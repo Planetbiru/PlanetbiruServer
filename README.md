@@ -163,6 +163,9 @@ python -m PyInstaller ^
 
 This project is open-source and available under the MIT License.
 
+
+Visit our website: https://planetbiru.com
+
 ---
 *Created by Kamshory*
 

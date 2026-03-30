@@ -307,7 +307,7 @@ class SettingsDialog(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
         self.parent = parent
-        self.setWindowTitle(tr(parent.current_lang, "settings_title"))
+        self.setWindowTitle(tr(parent.current_lang, "port_configuration_title"))
         self.setModal(True)
         self.resize(300, 200)
         
@@ -834,8 +834,8 @@ class ControlPanel(QWidget):
         self.btn_open_browser.clicked.connect(lambda: webbrowser.open("http://localhost/"))
 
         # Tombol Port Settings
-        self.btn_settings = QPushButton()
-        self.btn_settings.clicked.connect(self.open_settings)
+        self.btn_port_configuration = QPushButton()
+        self.btn_port_configuration.clicked.connect(self.open_settings)
 
         # Tombol Scheduler Settings
         self.btn_scheduler_settings = QPushButton()
@@ -892,7 +892,7 @@ class ControlPanel(QWidget):
         layout.addWidget(self.btn_open_browser, 0, 1, 1, 1)
         layout.addWidget(self.btn_minimize, 0, 2, 1, 1)
         layout.addWidget(self.btn_scheduler_settings, 0, 3, 1, 1)
-        layout.addWidget(self.btn_settings, 0, 4, 1, 1)
+        layout.addWidget(self.btn_port_configuration, 0, 4, 1, 1)
         layout.addWidget(self.btn_mysql_password, 0, 5)
 
         # Baris 1: Apache (Status, Run, Stop, Local, External)
@@ -1025,7 +1025,7 @@ class ControlPanel(QWidget):
 
         self.btn_open_browser.setText(tr(lang, "btn_open_browser"))
         self.btn_minimize.setText(tr(lang, "btn_minimize"))
-        self.btn_settings.setText(tr(lang, "btn_settings"))
+        self.btn_port_configuration.setText(tr(lang, "btn_port_configuration"))
         self.btn_scheduler_settings.setText(tr(lang, "btn_manage_scheduler"))
 
         self.show_action.setText(tr(self.current_lang, "tray_menu_show"))
