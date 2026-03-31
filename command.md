@@ -27,6 +27,7 @@ python -m PyInstaller ^
   --add-data "public.png;." ^
   --add-data "local.png;." ^
   --add-data "apache.png;." ^
+  --add-data "php.png;." ^
   --add-data "mariadb.png;." ^
   --add-data "redis.png;." ^
   --add-data "exit.png;." ^

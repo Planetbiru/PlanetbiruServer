@@ -41,6 +41,9 @@ The panel includes a powerful cron scheduler that allows you to run system comma
 **Background Task Management:**
 Tasks executed by the scheduler run in the background without intrusive console windows, making it ideal for automation.
 
+**Customizable Startup Automation:**
+Beyond standard services, users can define custom commands to run automatically when the panel starts. This is perfect for initializing development tools, proxies, or custom scripts, centralizing all project-related processes in one place.
+
 ### Intuitive and Multilingual User Experience
 
 **Responsive PyQt5 Interface:**
@@ -70,6 +73,7 @@ In summary, Planetbiru Server Control Panel stands out for its focus on portabil
 *   **Access Control:** Quickly toggle services between **Local Mode** (127.0.0.1) and **Public Mode** (0.0.0.0).
 *   **MariaDB Password Management:** Change or reset the MariaDB root password. Features a secure **Force Reset** protected by a hashed Administrator Password.
 *   **Precise Cron Scheduler:** Execute system commands or PHP scripts using cron expressions. Tasks run in the background without console windows. Status can be toggled directly from the UI.
+*   **Startup Task Manager:** Manage system commands that execute automatically when the panel opens. Includes real-time status monitoring (Running/Finished), PID tracking, and manual start/stop controls.
 *   **System Tray Integration:** Run in the background with dynamic tray icons. Control individual services via submenus featuring Start, Stop, Public, and Local status icons.
 *   **Port Collision Detection:** Automatically checks if ports 80 (Apache) or 3306 (MySQL) are already in use before starting services.
 *   **Activity Logging:** Real-time logging of service actions, PID tracking, and environment changes, stored in a thread-safe SQLite database.
