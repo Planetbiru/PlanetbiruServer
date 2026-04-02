@@ -12,27 +12,7 @@ python -m PyInstaller --noconsole --onefile --name PlanetbiruServer --icon=icon.
 ```
 
 ```bash
-python -m PyInstaller ^
-  --noconsole ^
-  --onefile ^
-  --name PlanetbiruServer ^
-  --icon=icon.ico ^
-  --hidden-import=croniter ^
-  --hidden-import=dateutil ^
-  --add-data "icon.ico;." ^
-  --add-data "maximize.png;." ^
-  --add-data "minimize.png;." ^
-  --add-data "start.png;." ^
-  --add-data "stop.png;." ^
-  --add-data "public.png;." ^
-  --add-data "local.png;." ^
-  --add-data "apache.png;." ^
-  --add-data "php.png;." ^
-  --add-data "mariadb.png;." ^
-  --add-data "redis.png;." ^
-  --add-data "exit.png;." ^
-  --exclude-module numpy --exclude-module pandas --exclude-module matplotlib ^
-  main.py
+python -m PyInstaller --noconsole --onefile --name PlanetbiruServer --icon=icon.ico --hidden-import=croniter --hidden-import=dateutil --add-data "icon.ico;." --add-data "maximize.png;." --add-data "minimize.png;." --add-data "start.png;." --add-data "stop.png;." --add-data "public.png;." --add-data "local.png;." --add-data "apache.png;." --add-data "php.png;." --add-data "mariadb.png;." --add-data "redis.png;." --add-data "exit.png;." --exclude-module numpy --exclude-module pandas --exclude-module matplotlib main.py
 
 ```
 
