@@ -59,7 +59,7 @@ def is_pid_running(pid):
 
 def is_port_in_use(port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.settimeout(0.2)
+        s.settimeout(0.1)
         return s.connect_ex(('127.0.0.1', port)) == 0
 
 def replace_and_write(template_name, target_path):
@@ -949,6 +949,8 @@ class RedisPasswordDialog(QDialog):
             QMessageBox.critical(self, tr(lang, "error_title"), str(e))
 
 class ControlPanel(QWidget):
+    service_status_changed = pyqtSignal(str) # Signal harus didefinisikan di level kelas
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Planetbiru Server")
@@ -964,6 +966,11 @@ class ControlPanel(QWidget):
         self.resize_timer.setSingleShot(True)
         self.resize_timer.timeout.connect(self.save_window_size)
         
+        # Track services currently in transition (starting/stopping)
+        self.busy_services = {}
+        self.busy_lock = threading.Lock()
+        self.service_status_changed.connect(self.update_service_ui) # Hubungkan signal ke method update UI
+
         # Tombol Apache (Gunakan satu tombol untuk Start/Stop)
         self.btn_apache_toggle = QPushButton()
         self.btn_apache_toggle.clicked.connect(lambda: self.toggle_service_action("apache", APACHE_PATH))
@@ -1328,8 +1335,11 @@ class ControlPanel(QWidget):
             "mysql": int(get_setting('mysql_port', '3306')),
             "redis": int(get_setting('redis_port', '6379'))
         }
+        pid = int(get_setting(f"{name}_pid", "0"))
         
-        if is_port_in_use(port_map[name]):
+        # Gunakan kombinasi Port dan PID untuk deteksi yang lebih reliabel
+        # Jika salah satu aktif, maka kita anggap layanan sedang berjalan dan ingin dihentikan
+        if is_port_in_use(port_map[name]) or is_pid_running(pid):
             self.stop_service(name)
         else:
             self.run_service(name, path)
@@ -1499,19 +1509,39 @@ class ControlPanel(QWidget):
         """Fungsi mandiri untuk memperbarui seluruh elemen UI terkait satu layanan."""
         lang = self.current_lang
         
+        with self.busy_lock:
+            is_busy = name in self.busy_services
+            action = self.busy_services.get(name)
+        
         # 1. Deteksi Port dan Mode
         port_defaults = {"apache": "80", "mysql": "3306", "redis": "6379"}
-        port = int(get_setting(f"{name}_port", port_defaults[name]))
-        is_running = is_port_in_use(port)
-        is_online = get_setting(f"{name}_access_mode", "local") == "external"
+        port_val = get_setting(f"{name}_port", port_defaults[name])
+        try:
+            port = int(port_val)
+        except (ValueError, TypeError):
+            port = int(port_defaults[name])
 
+        # Periksa status berdasarkan Port ATAU PID untuk menghindari lag saat startup
+        pid = int(get_setting(f"{name}_pid", "0"))
+        is_running = is_port_in_use(port) or is_pid_running(pid)
+        
+        is_online = get_setting(f"{name}_access_mode", "local") == "external"
+        
         # 2. Update Tombol Start/Stop (Berbasis Aksi)
         run_key = f"btn_{name}_stop" if is_running else f"btn_{name}_run"
         run_text = tr(lang, run_key)
-        getattr(self, f"btn_{name}_toggle").setText(run_text)
+        
+        # 1.5. Update Button State (Busy vs Normal)
+        toggle_btn = getattr(self, f"btn_{name}_toggle")
+        toggle_btn.setEnabled(not is_busy)
+
+        if is_busy:
+            toggle_btn.setText(tr(lang, "btn_starting" if action == "start" else "btn_stopping"))
+        else:
+            toggle_btn.setText(run_text)
         
         tray_run = getattr(self, f"{name}_tray_run")
-        tray_run.setText(run_text)
+        tray_run.setText(tr(lang, "btn_starting" if action == "start" else "btn_stopping") if is_busy else run_text)
         run_icon = "stop.png" if is_running else "start.png"
         run_icon_path = os.path.join(BUNDLE_PATH, run_icon)
         if os.path.exists(run_icon_path):
@@ -1540,10 +1570,16 @@ class ControlPanel(QWidget):
         status_label = getattr(self, f"{name}_status")
         online_label = tr(lang, "status_public" if is_online else "status_local")
         
-        if is_running:
+        if is_busy:
+            # Gunakan status 'Running' sebagai basis jika sedang proses berhenti
+            status_key = f"{name}_status_running" if action == "stop" else f"{name}_status"
+            base_status = tr(lang, status_key)
+            label_text = f"{base_status}... ({tr(lang, 'btn_starting' if action == 'start' else 'btn_stopping')})"
+            style = "color: orange;"
+        elif is_running:
             base_status = tr(lang, f"{name}_status_running")
             label_text = f"{base_status} ({online_label})"
-            style = "color: green; font-weight: bold;"
+            style = "color: green;"
         else:
             base_status = tr(lang, f"{name}_status")
             label_text = f"{base_status} ({online_label})"
@@ -1637,6 +1673,39 @@ class ControlPanel(QWidget):
         for svc in ["apache", "mysql", "redis"]:
             self.stop_service(svc)
 
+    def _poll_service_status(self, name, target_state, timeout=30, interval=0.5):
+        """Memantau status layanan di thread terpisah hingga mencapai target atau timeout."""
+        start_time = time.time()
+        port_defaults = {"apache": "80", "mysql": "3306", "redis": "6379"}
+        
+        while time.time() - start_time < timeout:
+            port_val = get_setting(f"{name}_port", port_defaults[name])
+            try:
+                port = int(port_val)
+            except:
+                port = int(port_defaults[name])
+            
+            pid = int(get_setting(f"{name}_pid", "0"))
+            port_active = is_port_in_use(port)
+            pid_active = is_pid_running(pid)
+
+            if target_state: # Kita mencoba memulai layanan
+                # Konfirmasi berjalan jika port aktif DAN PID aktif
+                if port_active and pid_active:
+                    add_log(f"Service {name} confirmed running (Port active: {port_active}, PID active: {pid_active}).")
+                    break
+            else: # Kita mencoba menghentikan layanan
+                # Konfirmasi berhenti jika port TIDAK aktif DAN PID TIDAK aktif
+                if not port_active and not pid_active:
+                    add_log(f"Service {name} confirmed stopped (Port active: {port_active}, PID active: {pid_active}).")
+                    break
+            time.sleep(interval)
+        
+        else: # Blok ini dieksekusi jika loop selesai tanpa 'break' (yaitu, timeout)
+            add_log(f"Service {name} did not reach target state ({'running' if target_state else 'stopped'}) within {timeout} seconds. Current status: Port active={port_active}, PID active={pid_active}", "WARNING")
+        with self.busy_lock:
+            if name in self.busy_services: del self.busy_services[name]
+        self.service_status_changed.emit(name)
     def set_all_online(self):
         """Mengubah semua layanan ke Mode Publik (Online)."""
         add_log("Tray Action: Putting all services Online (Public Mode)...", "INFO")
@@ -1652,7 +1721,7 @@ class ControlPanel(QWidget):
         set_mysql_access(False, force=True)
         set_redis_access(False, force=True)
         self.update_service_status()
-
+        
     def initialize_mariadb(self):
         add_log("Checking MariaDB data directory...")
         data_dir = os.path.join(BASE_PATH, "data", "mysql")
@@ -1679,6 +1748,11 @@ class ControlPanel(QWidget):
         return True
 
     def run_service(self, name, path):
+        with self.busy_lock:
+            self.busy_services[name] = "start"
+        self.update_service_ui(name)
+        QApplication.processEvents() # Paksa UI untuk update teks "Starting..."
+
         service_root = os.path.dirname(os.path.dirname(path))
         
         # Port Check
@@ -1692,11 +1766,13 @@ class ControlPanel(QWidget):
 
         if not os.path.exists(path):
             add_log(f"FAILED: Path not found - {path}", "ERROR")
+            if name in self.busy_services: del self.busy_services[name]
             return
 
         if name == "mysql":
             if get_setting('mariadb_installed', '0') != '1':
                 if not self.initialize_mariadb():
+                    if name in self.busy_services: del self.busy_services[name]
                     return
 
         try:
@@ -1727,12 +1803,27 @@ class ControlPanel(QWidget):
             
             set_setting(f"{name}_pid", str(proc.pid))
             add_log(f"SUCCESS: {name} started (PID: {proc.pid})")
+            # Mulai polling hingga layanan terdeteksi berjalan
+            
+            # Update UI segera setelah proses dimulai (tanpa menunggu polling port)
+            with self.busy_lock:
+                if name in self.busy_services: del self.busy_services[name]
+            self.service_status_changed.emit(name)
+            
+            poll_thread = threading.Thread(target=self._poll_service_status, args=(name, True), daemon=True)
+            poll_thread.start()
         except Exception as e:
             add_log(f"FAILED to start {name}: {str(e)}", "ERROR")
-        self.update_service_status()
+            with self.busy_lock:
+                if name in self.busy_services: del self.busy_services[name]
+            self.service_status_changed.emit(name)
 
     def stop_service(self, name):
+        with self.busy_lock:
+            self.busy_services[name] = "stop"
         add_log(f"Stopping service: {name}")
+        self.update_service_ui(name)
+        QApplication.processEvents() # Paksa UI untuk update teks "Stopping..."
 
         proc = getattr(self, f"{name}_proc")
         if proc and proc.poll() is None:
@@ -1771,7 +1862,14 @@ class ControlPanel(QWidget):
 
         setattr(self, f"{name}_proc", None)
         set_setting(f"{name}_pid", "0")
-        self.update_service_status()
+        
+        # Update UI segera setelah perintah stop dikirim
+        with self.busy_lock:
+            if name in self.busy_services: del self.busy_services[name]
+        self.service_status_changed.emit(name)
+        
+        # Mulai polling hingga layanan terdeteksi benar-benar berhenti
+        threading.Thread(target=self._poll_service_status, args=(name, False), daemon=True).start()
 
     def run_startup_tasks(self):
         """Menjalankan semua task startup yang aktif."""

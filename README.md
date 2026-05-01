@@ -21,8 +21,11 @@ The panel allows you to quickly switch between "Local Mode" (accessible only fro
 
 **Automatic Port Detection:**
 Before running services, the application checks whether required ports (such as 80 or 3306) are already in use, providing warnings to avoid conflicts.
+**Intelligent Service Status Detection:**
+Before running or stopping services, the application intelligently checks both port availability and active process IDs (PIDs) to accurately determine service status and prevent conflicts, providing warnings if ports are already in use.
 
 ### Enhanced Security and Stability
+### Enhanced Stability and Security
 
 **Secure MariaDB "Force Reset" Feature:**
 If the MariaDB root password is forgotten, the force reset feature can be used. Importantly, this feature is protected by a separate Administrator Password that is hashed (using SHA-256) and stored in an internal database. This prevents unauthorized users from resetting the database password.
@@ -48,6 +51,7 @@ Beyond standard services, users can define custom commands to run automatically 
 
 **Responsive PyQt5 Interface:**
 The UI built with PyQt5 provides a fast and responsive desktop experience.
+The UI built with PyQt5 provides a fast and responsive desktop experience, offering immediate visual feedback on service actions (Start/Stop) and displaying logical status messages during transitions (e.g., 'Running... (Stopping...)').
 
 **Comprehensive System Tray Integration:**
 The application can run in the background, with all essential controls (start/stop/access mode) available through the system tray icon, including dynamic icons for each service that display their status.
@@ -70,6 +74,7 @@ In summary, Planetbiru Server Control Panel stands out for its focus on portabil
 ## 🚀 Features
 
 *   **Service Management:** Individual and batch control (Start/Stop) for Apache, MariaDB, and Redis.
+    *   **Intelligent Status Detection:** Uses both port and process ID (PID) to ensure accurate UI representation and prevent misclicks, providing immediate feedback on actions.
 *   **Access Control:** Quickly toggle services between **Local Mode** (127.0.0.1) and **Public Mode** (0.0.0.0).
 *   **MariaDB Password Management:** Change or reset the MariaDB root password. Features a secure **Force Reset** protected by a hashed Administrator Password.
 *   **Precise Cron Scheduler:** Execute system commands or PHP scripts using cron expressions. Tasks run in the background without console windows. Status can be toggled directly from the UI.
@@ -78,6 +83,7 @@ In summary, Planetbiru Server Control Panel stands out for its focus on portabil
 *   **Port Collision Detection:** Automatically checks if ports 80 (Apache) or 3306 (MySQL) are already in use before starting services.
 *   **Activity Logging:** Real-time logging of service actions, PID tracking, and environment changes, stored in a thread-safe SQLite database.
 *   **Automatic Configuration:** Automatically generates configuration files (`httpd.conf`, `php.ini`, `my.ini`, `redis.conf`) from templates, dynamically injecting the current installation directory path.
+*   **Automatic Configuration:** Automatically generates configuration files (`httpd.conf`, `php.ini`, `my.ini`, `redis.conf`) from templates, dynamically injecting the current installation directory path and port settings.
 *   **Multi-language Support:** Comprehensive localization including English, Indonesian, Malay, Javanese, Sundanese, Chinese, Japanese, Korean, Hindi, Arabic, and Urdu.
 *   **RTL Support:** Automatic layout adjustment for Right-to-Left languages like Arabic and Urdu.
 *   **Windows Integration:** Graceful process termination, option to run on Windows startup, and built-in Mutex to prevent multiple instances.
