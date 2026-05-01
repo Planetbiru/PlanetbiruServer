@@ -5,7 +5,7 @@ from croniter import croniter
 from PyQt5.QtWidgets import (QApplication, QWidget, QPushButton, QLabel,
                              QGridLayout, QLineEdit, QTableWidget, QTableWidgetItem, QCheckBox,
                              QComboBox, QMessageBox, QInputDialog,
-                             QSystemTrayIcon, QMenu, QAction, QStyle, QDialog, QHBoxLayout)
+                             QSystemTrayIcon, QMenu, QAction, QStyle, QDialog, QHBoxLayout, QVBoxLayout)
 from PyQt5.QtGui import QIcon
 from PyQt5.QtCore import Qt
 
@@ -727,6 +727,126 @@ class StartupDialog(QDialog):
             time.sleep(0.5)
             self.load_tasks()
 
+class RedisViewerDialog(QDialog):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.parent = parent
+        lang = parent.current_lang
+        self.setWindowTitle(tr(lang, "redis_viewer_title"))
+        self.setModal(True)
+        self.resize(700, 500)
+
+        layout = QVBoxLayout()
+
+        # Filter Area
+        filter_layout = QHBoxLayout()
+        self.filter_input = QLineEdit()
+        self.filter_input.setPlaceholderText(tr(lang, "help_search_redis"))
+        self.filter_input.textChanged.connect(self.filter_data)
+        filter_layout.addWidget(QLabel(tr(lang, "lbl_search_logs")))
+        filter_layout.addWidget(self.filter_input)
+        
+        self.btn_refresh = QPushButton(tr(lang, "btn_refresh"))
+        self.btn_refresh.clicked.connect(self.load_data)
+        filter_layout.addWidget(self.btn_refresh)
+        
+        layout.addLayout(filter_layout)
+
+        # Table Area
+        self.table = QTableWidget()
+        self.table.setColumnCount(3)
+        self.table.setHorizontalHeaderLabels([
+            tr(lang, "col_redis_key"),
+            tr(lang, "col_redis_type"),
+            tr(lang, "col_redis_value")
+        ])
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers) # Read-only
+        layout.addWidget(self.table)
+
+        self.setLayout(layout)
+        self.load_data()
+        
+        direction = self.parent.get_lang_dir(lang)
+        self.setLayoutDirection(Qt.RightToLeft if direction == 'rtl' else Qt.LeftToRight)
+
+    def get_redis_cli_path(self):
+        return os.path.join(BASE_PATH, "redis", "redis-cli.exe")
+
+    def run_redis_cmd(self, args):
+        cli = self.get_redis_cli_path()
+        if not os.path.exists(cli):
+            return None
+        
+        port = get_setting('redis_port', '6379')
+        cmd = [cli, "-p", port]
+        
+        # Cek password dari config
+        pwd = self.get_password_from_conf()
+        if pwd:
+            cmd.extend(["-a", pwd, "--no-auth-warning"])
+            
+        cmd.extend(args)
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, 
+                                    creationflags=subprocess.CREATE_NO_WINDOW, timeout=2)
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except:
+            pass
+        return None
+
+    def get_password_from_conf(self):
+        conf_path = os.path.join(BASE_PATH, "redis", "redis.windows.conf")
+        if os.path.exists(conf_path):
+            try:
+                with open(conf_path, "r", encoding='utf-8') as f:
+                    for line in f:
+                        if line.strip().startswith("requirepass"):
+                            parts = line.split()
+                            if len(parts) > 1: return parts[1]
+            except: pass
+        return None
+
+    def load_data(self):
+        self.table.setRowCount(0)
+        # Get all keys
+        keys_raw = self.run_redis_cmd(["keys", "*"])
+        if not keys_raw:
+            return
+
+        keys = keys_raw.splitlines()
+        for key in keys:
+            # Get Type
+            rtype = self.run_redis_cmd(["type", key]) or "unknown"
+            
+            # Get Value based on type
+            val = ""
+            if rtype == "string":
+                val = self.run_redis_cmd(["get", key])
+            elif rtype == "list":
+                val = self.run_redis_cmd(["lrange", key, "0", "-1"])
+            elif rtype == "set":
+                val = self.run_redis_cmd(["smembers", key])
+            elif rtype == "hash":
+                val = self.run_redis_cmd(["hgetall", key])
+            elif rtype == "zset":
+                val = self.run_redis_cmd(["zrange", key, "0", "-1"])
+            
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self.table.setItem(row, 0, QTableWidgetItem(key))
+            self.table.setItem(row, 1, QTableWidgetItem(rtype))
+            self.table.setItem(row, 2, QTableWidgetItem(str(val)))
+        
+        self.table.resizeColumnsToContents()
+
+    def filter_data(self):
+        search_text = self.filter_input.text().lower()
+        for i in range(self.table.rowCount()):
+            key_item = self.table.item(i, 0)
+            match = search_text in key_item.text().lower() if key_item else True
+            self.table.setRowHidden(i, not match)
+
 class MariaDBPasswordDialog(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
@@ -1247,11 +1367,23 @@ class ControlPanel(QWidget):
 
         self.btn_redis_config = QPushButton()
         self.btn_redis_config.clicked.connect(lambda: self.open_config("redis", True))
-        self.btn_redis_cli = QPushButton()
-        self.btn_redis_cli.clicked.connect(lambda: subprocess.Popen(
+        
+        self.btn_redis_data = QPushButton()
+        self.redis_data_menu = QMenu(self)
+        self.action_redis_cli = QAction("", self)
+        if os.path.exists(os.path.join(BUNDLE_PATH, "redis.png")):
+            self.action_redis_cli.setIcon(QIcon(os.path.join(BUNDLE_PATH, "redis.png")))
+        self.action_redis_cli.triggered.connect(lambda: subprocess.Popen(
             [os.path.join(BASE_PATH, "redis", "redis-cli.exe")], 
             creationflags=subprocess.CREATE_NEW_CONSOLE
         ))
+        self.action_redis_viewer = QAction("", self)
+        if os.path.exists(os.path.join(BUNDLE_PATH, "redis.png")):
+            self.action_redis_viewer.setIcon(QIcon(os.path.join(BUNDLE_PATH, "redis.png")))
+        self.action_redis_viewer.triggered.connect(self.open_redis_viewer)
+        self.redis_data_menu.addAction(self.action_redis_cli)
+        self.redis_data_menu.addAction(self.action_redis_viewer)
+        self.btn_redis_data.setMenu(self.redis_data_menu)
 
         # UI Logs
         self.log_label = QLabel()
@@ -1301,7 +1433,7 @@ class ControlPanel(QWidget):
         layout.addWidget(self.btn_redis_toggle, 4, 2)
         layout.addWidget(self.btn_redis_access_toggle, 4, 3)
         layout.addWidget(self.btn_redis_config, 4, 4)
-        layout.addWidget(self.btn_redis_cli, 4, 5)
+        layout.addWidget(self.btn_redis_data, 4, 5)
 
         # Baris 5 dan 6: Global Settings
         layout.addWidget(self.chk_run_startup, 0, 0, 1, 2)
@@ -1416,7 +1548,9 @@ class ControlPanel(QWidget):
 
         # Update teks tombol Redis
         self.btn_redis_config.setText(tr(lang, "btn_redis_config"))
-        self.btn_redis_cli.setText(tr(lang, "btn_redis_cli"))
+        self.btn_redis_data.setText(tr(lang, "btn_redis_data"))
+        self.action_redis_cli.setText(tr(lang, "btn_redis_cli"))
+        self.action_redis_viewer.setText(tr(lang, "btn_redis_viewer"))
 
         self.btn_open_browser.setText(tr(lang, "btn_open_browser"))
         self.btn_minimize.setText(tr(lang, "btn_minimize"))
@@ -1644,6 +1778,10 @@ class ControlPanel(QWidget):
 
     def open_redis_password_dialog(self):
         dialog = RedisPasswordDialog(self)
+        dialog.exec_()
+
+    def open_redis_viewer(self):
+        dialog = RedisViewerDialog(self)
         dialog.exec_()
 
     def apply_port_settings(self):
