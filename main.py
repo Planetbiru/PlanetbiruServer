@@ -1241,7 +1241,7 @@ class ControlPanel(QWidget):
 
         self.action_redis_log = QAction("", self)
         self.action_redis_log.setIcon(self.style().standardIcon(QStyle.SP_FileDialogInfoView))
-        self.action_redis_log.triggered.connect(lambda: self.open_log_in_notepad("server_log.txt"))
+        self.action_redis_log.triggered.connect(lambda: self.open_log_in_notepad("logs/redis.log"))
         self.redis_logs_menu.addAction(self.action_redis_log)
         self.btn_view_logs.setMenu(self.logs_menu)
 
@@ -1753,7 +1753,11 @@ class ControlPanel(QWidget):
         self.update_service_ui(name)
         QApplication.processEvents() # Paksa UI untuk update teks "Starting..."
 
-        service_root = os.path.dirname(os.path.dirname(path))
+        # Perbaikan Logika Service Root:
+        # Apache & MySQL berada di folder /bin/ (naik 2 level)
+        # Redis biasanya langsung berada di foldernya (naik 1 level)
+        parent_dir = os.path.dirname(path)
+        service_root = parent_dir if name == "redis" else os.path.dirname(parent_dir)
         
         # Port Check
         port_map = {
@@ -1766,7 +1770,9 @@ class ControlPanel(QWidget):
 
         if not os.path.exists(path):
             add_log(f"FAILED: Path not found - {path}", "ERROR")
-            if name in self.busy_services: del self.busy_services[name]
+            with self.busy_lock:
+                if name in self.busy_services: del self.busy_services[name]
+            self.service_status_changed.emit(name)
             return
 
         if name == "mysql":
