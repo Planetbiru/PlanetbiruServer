@@ -1300,10 +1300,12 @@ class ControlPanel(QWidget):
         layout.addWidget(self.chk_run_startup, 0, 0, 1, 2)
         layout.addWidget(self.chk_auto_start_services, 1, 0, 1, 2)
 
-        # Baris 7 dan 8: Logs
-        layout.addWidget(self.log_label, 5, 0, 1, 1)
-        layout.addWidget(self.search_input, 5, 1, 1, 4)
+        # Baris 5: Label Log & Tombol Clear
+        layout.addWidget(self.log_label, 5, 0, 1, 5)
+        layout.addWidget(self.search_input, 5, 2, 1, 3)
         layout.addWidget(self.btn_clear_logs, 5, 5)
+
+        # Baris 6: Tabel Log
         layout.addWidget(self.log_table, 6, 0, 1, 6)
 
         self.setLayout(layout)
