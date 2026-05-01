@@ -19,12 +19,9 @@ All dependencies, configurations, and service data (Apache, MariaDB, Redis) are 
 **Easy Mode Switching:**
 The panel allows you to quickly switch between "Local Mode" (accessible only from the local machine, 127.0.0.1) and "Public Mode" (accessible from the network, 0.0.0.0). This is a very useful feature for both security and convenience during local development or presentations, without needing to manually edit configuration files.
 
-**Automatic Port Detection:**
-Before running services, the application checks whether required ports (such as 80 or 3306) are already in use, providing warnings to avoid conflicts.
 **Intelligent Service Status Detection:**
 Before running or stopping services, the application intelligently checks both port availability and active process IDs (PIDs) to accurately determine service status and prevent conflicts, providing warnings if ports are already in use.
 
-### Enhanced Security and Stability
 ### Enhanced Stability and Security
 
 **Secure MariaDB "Force Reset" Feature:**
@@ -50,7 +47,6 @@ Beyond standard services, users can define custom commands to run automatically 
 ### Intuitive and Multilingual User Experience
 
 **Responsive PyQt5 Interface:**
-The UI built with PyQt5 provides a fast and responsive desktop experience.
 The UI built with PyQt5 provides a fast and responsive desktop experience, offering immediate visual feedback on service actions (Start/Stop) and displaying logical status messages during transitions (e.g., 'Running... (Stopping...)').
 
 **Comprehensive System Tray Integration:**
@@ -82,7 +78,6 @@ In summary, Planetbiru Server Control Panel stands out for its focus on portabil
 *   **System Tray Integration:** Run in the background with dynamic tray icons. Control individual services via submenus featuring Start, Stop, Public, and Local status icons.
 *   **Port Collision Detection:** Automatically checks if ports 80 (Apache) or 3306 (MySQL) are already in use before starting services.
 *   **Activity Logging:** Real-time logging of service actions, PID tracking, and environment changes, stored in a thread-safe SQLite database.
-*   **Automatic Configuration:** Automatically generates configuration files (`httpd.conf`, `php.ini`, `my.ini`, `redis.conf`) from templates, dynamically injecting the current installation directory path.
 *   **Automatic Configuration:** Automatically generates configuration files (`httpd.conf`, `php.ini`, `my.ini`, `redis.conf`) from templates, dynamically injecting the current installation directory path and port settings.
 *   **Multi-language Support:** Comprehensive localization including English, Indonesian, Malay, Javanese, Sundanese, Chinese, Japanese, Korean, Hindi, Arabic, and Urdu.
 *   **RTL Support:** Automatic layout adjustment for Right-to-Left languages like Arabic and Urdu.
