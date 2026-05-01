@@ -19,7 +19,12 @@ else:
     BUNDLE_PATH = BASE_PATH
 
 DB_PATH = os.path.join(BASE_PATH, "setting.db")
+
+# Gunakan localization.ini dari folder EXE jika ada (user override), 
+# jika tidak ada gunakan yang di dalam bundle.
 INI_PATH = os.path.join(BASE_PATH, "localization.ini")
+if not os.path.exists(INI_PATH):
+    INI_PATH = os.path.join(BUNDLE_PATH, "localization.ini")
 
 APACHE_PATH = os.path.join(BASE_PATH, "apache", "bin", "httpd.exe")
 MYSQL_PATH = os.path.join(BASE_PATH, "mysql", "bin", "mysqld.exe")
@@ -36,13 +41,35 @@ log_signal = LogSignal()
 config = configparser.ConfigParser()
 config.read(INI_PATH, encoding='utf-8')
 
+def is_pid_running(pid):
+    """Memeriksa apakah PID masih aktif di Windows."""
+    if pid <= 0: return False
+    import ctypes
+    SYNCHRONIZE = 0x00100000
+    PROCESS_QUERY_INFORMATION = 0x0400
+    # Membuka proses untuk memeriksa status
+    handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_INFORMATION | SYNCHRONIZE, False, pid)
+    if handle:
+        exit_code = ctypes.c_ulong()
+        ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
+        ctypes.windll.kernel32.CloseHandle(handle)
+        # 259 adalah STILL_ACTIVE
+        return exit_code.value == 259
+    return False
+
 def is_port_in_use(port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.settimeout(0.2)
+        s.settimeout(0.1)
         return s.connect_ex(('127.0.0.1', port)) == 0
 
 def replace_and_write(template_name, target_path):
+    # Cek di folder eksternal (BASE_PATH) terlebih dahulu untuk kustomisasi user
     template_path = os.path.join(BASE_PATH, "config", template_name)
+    
+    if not os.path.exists(template_path):
+        # Jika tidak ada, baru cari di dalam bundle internal (BUNDLE_PATH)
+        template_path = os.path.join(BUNDLE_PATH, "config", template_name)
+    
     if not os.path.exists(template_path):
         add_log(f"Template not found: {template_path}", "WARNING")
         return
@@ -77,7 +104,7 @@ def prepare_environment():
     replace_and_write("httpd-template.conf", os.path.join(BASE_PATH, "config", "httpd.conf"))
     replace_and_write("php-template.ini", os.path.join(BASE_PATH, "php", "php.ini"))
     replace_and_write("my-template.ini", os.path.join(BASE_PATH, "config", "my.ini"))
-    replace_and_write("redis.windows-template.conf", os.path.join(BASE_PATH, "redis", "redis.windows.conf"))
+    replace_and_write("redis.windows-service-template.conf", os.path.join(BASE_PATH, "redis", "redis.windows.conf"))
 
     # Update PATH for PHP
     php_path = os.path.join(BASE_PATH, "php")
@@ -123,6 +150,12 @@ def init_db():
             cron_expr TEXT NOT NULL,
             command TEXT NOT NULL,
             enabled INTEGER DEFAULT 1
+        )""")
+        cur.execute("""CREATE TABLE IF NOT EXISTS startup_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            command TEXT NOT NULL,
+            enabled INTEGER DEFAULT 1,
+            pid INTEGER DEFAULT 0
         )""")
         try:
             cur.execute("ALTER TABLE jobs ADD COLUMN enabled INTEGER DEFAULT 1")
@@ -328,10 +361,14 @@ class SettingsDialog(QDialog):
         self.redis_port.setToolTip(tr(parent.current_lang, "help_redis_port"))
         layout.addWidget(self.redis_port, 2, 1)
         
+        self.btn_default = QPushButton(tr(parent.current_lang, "btn_default"))
+        self.btn_default.clicked.connect(self.set_defaults)
+        layout.addWidget(self.btn_default, 3, 0)
+
         self.btn_save = QPushButton(tr(parent.current_lang, "btn_save"))
         self.btn_save.clicked.connect(self.save)
-        layout.addWidget(self.btn_save, 3, 0, 1, 2)
-        
+        layout.addWidget(self.btn_save, 3, 1)
+
         self.setLayout(layout)
         direction = self.parent.get_lang_dir(self.parent.current_lang)
         self.setLayoutDirection(Qt.RightToLeft if direction == 'rtl' else Qt.LeftToRight)
@@ -342,6 +379,11 @@ class SettingsDialog(QDialog):
         set_setting('redis_port', self.redis_port.text())
         self.parent.apply_port_settings()
         self.accept()
+
+    def set_defaults(self):
+        self.apache_port.setText('80')
+        self.mysql_port.setText('3306')
+        self.redis_port.setText('6379')
 
 class SchedulerDialog(QDialog):
     def __init__(self, parent):
@@ -355,19 +397,19 @@ class SchedulerDialog(QDialog):
         
         layout.addWidget(QLabel(tr(parent.current_lang, "col_cron")), 0, 0)
         self.cron_input = QLineEdit("*/1 * * * *")
-        layout.addWidget(self.cron_input, 0, 1)
+        layout.addWidget(self.cron_input, 0, 1, 1, 3)
         
         layout.addWidget(QLabel(tr(parent.current_lang, "col_cmd")), 1, 0)
         self.cmd_input = QLineEdit("")
-        layout.addWidget(self.cmd_input, 1, 1)
+        layout.addWidget(self.cmd_input, 1, 1, 1, 3)
         
         self.chk_enabled = QCheckBox(tr(parent.current_lang, "lbl_enabled"))
         self.chk_enabled.setChecked(True)
-        layout.addWidget(self.chk_enabled, 2, 1)
+        layout.addWidget(self.chk_enabled, 2, 1, 1, 3)
         
         self.btn_add = QPushButton(tr(parent.current_lang, "btn_add_job"))
         self.btn_add.clicked.connect(self.add_job)
-        layout.addWidget(self.btn_add, 3, 0, 1, 2)
+        layout.addWidget(self.btn_add, 3, 1, 1, 1)
         
         self.job_table = QTableWidget()
         self.job_table.setColumnCount(4)
@@ -378,18 +420,17 @@ class SchedulerDialog(QDialog):
             tr(parent.current_lang, "col_enabled")
         ])
         self.job_table.itemClicked.connect(self.on_item_clicked)
-        layout.addWidget(self.job_table, 4, 0, 1, 2)
+        layout.addWidget(self.job_table, 4, 0, 1, 4)
         
         btn_layout = QHBoxLayout()
         btn_layout.setContentsMargins(0, 0, 0, 0)
         self.btn_edit = QPushButton(tr(parent.current_lang, "btn_edit_job"))
         self.btn_edit.clicked.connect(self.edit_job)
-        btn_layout.addWidget(self.btn_edit, 2) # Perbandingan lebar 2
+        layout.addWidget(self.btn_edit, 3, 2, 1, 1)
         
         self.btn_delete = QPushButton(tr(parent.current_lang, "btn_delete_job"))
         self.btn_delete.clicked.connect(self.delete_job)
-        btn_layout.addWidget(self.btn_delete, 1) # Perbandingan lebar 1
-        layout.addLayout(btn_layout, 5, 0, 1, 2)
+        layout.addWidget(self.btn_delete, 3, 3, 1, 1)
 
         self.setLayout(layout)
         self.load_jobs()
@@ -483,6 +524,208 @@ class SchedulerDialog(QDialog):
                     conn.commit()
                     conn.close()
                 self.load_jobs()
+
+class StartupDialog(QDialog):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.parent = parent
+        self.setWindowTitle(tr(parent.current_lang, "startup_title"))
+        self.setModal(True)
+        self.resize(600, 450)
+        
+        layout = QGridLayout()
+        
+        layout.addWidget(QLabel(tr(parent.current_lang, "col_cmd")), 0, 0)
+        self.cmd_input = QLineEdit("")
+        layout.addWidget(self.cmd_input, 0, 1, 1, 3)
+        
+        self.chk_enabled = QCheckBox(tr(parent.current_lang, "lbl_enabled"))
+        self.chk_enabled.setChecked(True)
+        layout.addWidget(self.chk_enabled, 1, 1)
+        
+        self.btn_add = QPushButton(tr(parent.current_lang, "btn_add_job"))
+        self.btn_add.clicked.connect(self.add_task)
+        layout.addWidget(self.btn_add, 2, 1, 1, 1)
+        
+        self.task_table = QTableWidget()
+        self.task_table.setColumnCount(5)
+        self.task_table.setHorizontalHeaderLabels([
+            tr(parent.current_lang, "col_id"),
+            tr(parent.current_lang, "col_cmd"),
+            tr(parent.current_lang, "col_status"),
+            tr(parent.current_lang, "col_enabled"),
+            "PID"
+        ])
+        self.task_table.itemClicked.connect(self.on_item_clicked)
+        layout.addWidget(self.task_table, 3, 0, 1, 4)
+        
+        self.btn_start = QPushButton(tr(parent.current_lang, "btn_start_task"))
+        self.btn_start.clicked.connect(self.manual_start)
+        layout.addWidget(self.btn_start, 4, 0, 1, 2)
+
+        self.btn_stop = QPushButton(tr(parent.current_lang, "btn_stop_task"))
+        self.btn_stop.clicked.connect(self.manual_stop)
+        layout.addWidget(self.btn_stop, 4, 2, 1, 2)
+
+        self.btn_edit = QPushButton(tr(parent.current_lang, "btn_edit_job"))
+        self.btn_edit.clicked.connect(self.edit_task)
+        layout.addWidget(self.btn_edit, 2, 2, 1, 1)
+        
+        self.btn_delete = QPushButton(tr(parent.current_lang, "btn_delete_job"))
+        self.btn_delete.clicked.connect(self.delete_task)
+        layout.addWidget(self.btn_delete, 2, 3, 1, 1)
+
+        self.setLayout(layout)
+        self.load_tasks()
+        
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.load_tasks)
+        self.timer.start(3000)
+
+        direction = self.parent.get_lang_dir(self.parent.current_lang)
+        self.setLayoutDirection(Qt.RightToLeft if direction == 'rtl' else Qt.LeftToRight)
+
+    def on_item_clicked(self, item):
+        row = item.row()
+        self.cmd_input.setText(self.task_table.item(row, 1).text())
+        status = self.task_table.item(row, 3).text()
+        self.chk_enabled.setChecked(status == tr(self.parent.current_lang, "status_enabled"))
+
+    def load_tasks(self):
+        current_row = self.task_table.currentRow()
+        self.task_table.setRowCount(0)
+        with db_lock:
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute("SELECT id, command, enabled, pid FROM startup_tasks")
+            tasks = cur.fetchall()
+            conn.close()
+            
+        for row_num, row_data in enumerate(tasks):
+            self.task_table.insertRow(row_num)
+            tid, cmd, enabled, pid = row_data
+            
+            is_running = is_pid_running(pid)
+            status_text = tr(self.parent.current_lang, "status_running") if is_running else tr(self.parent.current_lang, "status_finished")
+            enabled_text = tr(self.parent.current_lang, "status_enabled") if enabled == 1 else tr(self.parent.current_lang, "status_disabled")
+            
+            self.task_table.setItem(row_num, 0, QTableWidgetItem(str(tid)))
+            self.task_table.setItem(row_num, 1, QTableWidgetItem(cmd))
+            self.task_table.setItem(row_num, 2, QTableWidgetItem(status_text))
+            self.task_table.setItem(row_num, 3, QTableWidgetItem(enabled_text))
+            self.task_table.setItem(row_num, 4, QTableWidgetItem(str(pid)))
+            
+        if current_row >= 0:
+            self.task_table.setCurrentCell(current_row, 0)
+        self.task_table.resizeColumnsToContents()
+
+    def add_task(self):
+        cmd = self.cmd_input.text().strip()
+        if not cmd:
+            QMessageBox.warning(self, tr(self.parent.current_lang, "error_title"), 
+                                tr(self.parent.current_lang, "msg_command_empty"))
+            return
+        with db_lock:
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute("INSERT INTO startup_tasks (command, enabled) VALUES (?, ?)", 
+                        (cmd, 1 if self.chk_enabled.isChecked() else 0))
+            conn.commit()
+            conn.close()
+        self.load_tasks()
+
+    def edit_task(self):
+        curr = self.task_table.currentRow()
+        if curr >= 0:
+            pid = int(self.task_table.item(curr, 4).text())
+            if is_pid_running(pid):
+                QMessageBox.warning(self, "Error", tr(self.parent.current_lang, "msg_task_running_edit_error"))
+                return
+            
+            cmd = self.cmd_input.text().strip()
+            if not cmd:
+                QMessageBox.warning(self, tr(self.parent.current_lang, "error_title"), 
+                                    tr(self.parent.current_lang, "msg_command_empty"))
+                return
+            task_id = self.task_table.item(curr, 0).text()
+            with db_lock:
+                conn = sqlite3.connect(DB_PATH)
+                cur = conn.cursor()
+                cur.execute("UPDATE startup_tasks SET command=?, enabled=? WHERE id=?", 
+                            (cmd, 1 if self.chk_enabled.isChecked() else 0, task_id))
+                conn.commit()
+                conn.close()
+            self.load_tasks()
+
+    def delete_task(self):
+        curr = self.task_table.currentRow()
+        if curr >= 0:
+            pid = int(self.task_table.item(curr, 4).text())
+            if is_pid_running(pid):
+                QMessageBox.warning(self, "Error", tr(self.parent.current_lang, "msg_task_running_edit_error"))
+                return
+
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Question)
+            msg.setWindowTitle(tr(self.parent.current_lang, "confirm_delete_title"))
+            msg.setText(tr(self.parent.current_lang, "confirm_delete_startup_msg"))
+            btn_yes = msg.addButton(tr(self.parent.current_lang, "btn_yes"), QMessageBox.YesRole)
+            btn_no = msg.addButton(tr(self.parent.current_lang, "btn_no"), QMessageBox.NoRole)
+            msg.setDefaultButton(btn_no)
+            msg.exec_()
+
+            if msg.clickedButton() == btn_yes:
+                task_id = self.task_table.item(curr, 0).text()
+                with db_lock:
+                    conn = sqlite3.connect(DB_PATH)
+                    cur = conn.cursor()
+                    cur.execute("DELETE FROM startup_tasks WHERE id=?", (task_id,))
+                    conn.commit()
+                    conn.close()
+                self.load_tasks()
+
+    def manual_start(self):
+        curr = self.task_table.currentRow()
+        if curr >= 0:
+            task_id = self.task_table.item(curr, 0).text()
+            cmd = self.task_table.item(curr, 1).text()
+            pid = int(self.task_table.item(curr, 4).text())
+            
+            if not is_pid_running(pid):
+                self.parent.run_single_startup_task(task_id, cmd)
+                time.sleep(0.5)
+                self.load_tasks()
+
+    def manual_stop(self):
+        curr = self.task_table.currentRow()
+        if curr >= 0:
+            pid = int(self.task_table.item(curr, 4).text())
+            task_id = self.task_table.item(curr, 0).text()
+            if is_pid_running(pid):
+                try:
+                    subprocess.run(["taskkill", "/F", "/PID", str(pid)], 
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, 
+                                   creationflags=subprocess.CREATE_NO_WINDOW)
+                    with db_lock:
+                        conn = sqlite3.connect(DB_PATH)
+                        cur = conn.cursor()
+                        cur.execute("UPDATE startup_tasks SET pid=0 WHERE id=?", (task_id,))
+                        conn.commit()
+                        conn.close()
+                    add_log(f"Manual stop startup task ID {task_id} (PID {pid})")
+                except: pass
+                time.sleep(0.5)
+                self.load_tasks()
+
+            with db_lock:
+                conn = sqlite3.connect(DB_PATH)
+                cur = conn.cursor()
+                cur.execute("UPDATE startup_tasks SET pid=0 WHERE id=?", (task_id,))
+                conn.commit()
+                conn.close()
+
+            time.sleep(0.5)
+            self.load_tasks()
 
 class MariaDBPasswordDialog(QDialog):
     def __init__(self, parent):
@@ -642,7 +885,72 @@ class MariaDBPasswordDialog(QDialog):
             except Exception as e:
                 QMessageBox.critical(self, tr(lang, "error_title"), f"{tr(lang, 'msg_password_change_failed')}\n{str(e)}")
 
+class RedisPasswordDialog(QDialog):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.parent = parent
+        lang = parent.current_lang
+        self.setWindowTitle(tr(lang, "redis_password_title"))
+        self.setModal(True)
+        self.resize(350, 120)
+        
+        layout = QGridLayout()
+        layout.addWidget(QLabel(tr(lang, "lbl_redis_password")), 0, 0)
+        self.pass_input = QLineEdit()
+        self.pass_input.setEchoMode(QLineEdit.Password)
+        layout.addWidget(self.pass_input, 0, 1)
+        
+        self.btn_save = QPushButton(tr(lang, "btn_save"))
+        self.btn_save.clicked.connect(self.save_password)
+        layout.addWidget(self.btn_save, 1, 0, 1, 2)
+        
+        self.setLayout(layout)
+        direction = self.parent.get_lang_dir(lang)
+        self.setLayoutDirection(Qt.RightToLeft if direction == 'rtl' else Qt.LeftToRight)
+
+    def save_password(self):
+        new_pass = self.pass_input.text().strip()
+        template_name = "redis.windows-service-template.conf"
+        template_path = os.path.join(BASE_PATH, "config", template_name)
+        lang = self.parent.current_lang
+        
+        if not os.path.exists(template_path):
+            QMessageBox.warning(self, tr(lang, "error_title"), tr(lang, "msg_file_not_found"))
+            return
+
+        try:
+            with open(template_path, "r", encoding='utf-8') as f:
+                lines = f.readlines()
+            
+            new_lines = []
+            found = False
+            for line in lines:
+                if "requirepass" in line and not found:
+                    if new_pass:
+                        new_lines.append(f"requirepass {new_pass}\n")
+                    else:
+                        new_lines.append("# requirepass \n")
+                    found = True
+                elif "requirepass" in line and found:
+                    continue
+                else:
+                    new_lines.append(line)
+            
+            if not found and new_pass:
+                new_lines.append(f"\nrequirepass {new_pass}\n")
+            
+            with open(template_path, "w", encoding='utf-8') as f:
+                f.writelines(new_lines)
+            
+            self.parent.apply_port_settings()
+            QMessageBox.information(self, tr(lang, "success_title"), tr(lang, "msg_redis_password_changed_success"))
+            self.accept()
+        except Exception as e:
+            QMessageBox.critical(self, tr(lang, "error_title"), str(e))
+
 class ControlPanel(QWidget):
+    service_status_changed = pyqtSignal(str) # Signal harus didefinisikan di level kelas
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Planetbiru Server")
@@ -658,6 +966,11 @@ class ControlPanel(QWidget):
         self.resize_timer.setSingleShot(True)
         self.resize_timer.timeout.connect(self.save_window_size)
         
+        # Track services currently in transition (starting/stopping)
+        self.busy_services = {}
+        self.busy_lock = threading.Lock()
+        self.service_status_changed.connect(self.update_service_ui) # Hubungkan signal ke method update UI
+
         # Tombol Apache (Gunakan satu tombol untuk Start/Stop)
         self.btn_apache_toggle = QPushButton()
         self.btn_apache_toggle.clicked.connect(lambda: self.toggle_service_action("apache", APACHE_PATH))
@@ -679,8 +992,12 @@ class ControlPanel(QWidget):
         # Menu for Apache Configuration Dropdown
         self.apache_config_menu = QMenu(self)
         self.action_httpd_conf = QAction("httpd.conf", self)
+        if os.path.exists(os.path.join(BUNDLE_PATH, "apache.png")):
+            self.action_httpd_conf.setIcon(QIcon(os.path.join(BUNDLE_PATH, "apache.png")))
         self.action_httpd_conf.triggered.connect(lambda: self.open_config("apache"))
         self.action_php_ini = QAction("php.ini", self)
+        if os.path.exists(os.path.join(BUNDLE_PATH, "php.png")):
+            self.action_php_ini.setIcon(QIcon(os.path.join(BUNDLE_PATH, "php.png")))
         self.action_php_ini.triggered.connect(lambda: self.open_config("php"))
         self.apache_config_menu.addAction(self.action_httpd_conf)
         self.apache_config_menu.addAction(self.action_php_ini)
@@ -841,6 +1158,10 @@ class ControlPanel(QWidget):
         self.btn_scheduler_settings = QPushButton()
         self.btn_scheduler_settings.clicked.connect(self.open_scheduler)
 
+        # Tombol Startup Settings
+        self.btn_startup_settings = QPushButton()
+        self.btn_startup_settings.clicked.connect(self.open_startup)
+
         # Tombol Minimize to Tray
         self.btn_minimize = QPushButton()
         self.btn_minimize.clicked.connect(self.hide_to_tray)
@@ -862,7 +1183,67 @@ class ControlPanel(QWidget):
         self.btn_mysql_pma.clicked.connect(lambda: webbrowser.open(f"http://localhost:{get_setting('apache_port', '80')}/phpMyAdmin"))
 
         self.btn_mysql_password = QPushButton()
-        self.btn_mysql_password.clicked.connect(self.open_mysql_password_dialog)
+        self.password_menu = QMenu(self)
+        self.action_mariadb_pass = QAction("", self)
+        if os.path.exists(os.path.join(BUNDLE_PATH, "mariadb.png")):
+            self.action_mariadb_pass.setIcon(QIcon(os.path.join(BUNDLE_PATH, "mariadb.png")))
+        self.action_mariadb_pass.triggered.connect(self.open_mysql_password_dialog)
+        self.action_redis_pass = QAction("", self)
+        if os.path.exists(os.path.join(BUNDLE_PATH, "redis.png")):
+            self.action_redis_pass.setIcon(QIcon(os.path.join(BUNDLE_PATH, "redis.png")))
+        self.action_redis_pass.triggered.connect(self.open_redis_password_dialog)
+        self.password_menu.addAction(self.action_mariadb_pass)
+        self.password_menu.addAction(self.action_redis_pass)
+        self.btn_mysql_password.setMenu(self.password_menu)
+
+        self.btn_view_logs = QPushButton()
+
+        self.logs_menu = QMenu(self)
+        
+        self.apache_logs_menu = self.logs_menu.addMenu("Apache")
+        apache_icon_path = os.path.join(BUNDLE_PATH, "apache.png")
+        if os.path.exists(apache_icon_path):
+            self.apache_logs_menu.setIcon(QIcon(apache_icon_path))
+
+        self.action_apache_error = QAction("", self)
+        self.action_apache_error.setIcon(self.style().standardIcon(QStyle.SP_MessageBoxCritical))
+        self.action_apache_error.triggered.connect(lambda: self.open_log_in_notepad("apache/logs/error.log"))
+        self.action_apache_access = QAction("", self)
+        self.action_apache_access.setIcon(self.style().standardIcon(QStyle.SP_FileDialogContentsView))
+        self.action_apache_access.triggered.connect(lambda: self.open_log_in_notepad("apache/logs/access.log"))
+        self.apache_logs_menu.addAction(self.action_apache_error)
+        self.apache_logs_menu.addAction(self.action_apache_access)
+
+        self.php_logs_menu = self.logs_menu.addMenu("PHP")
+        php_icon_path = os.path.join(BUNDLE_PATH, "php.png")
+        if os.path.exists(php_icon_path):
+            self.php_logs_menu.setIcon(QIcon(php_icon_path))
+
+        self.action_php_error = QAction("", self)
+        self.action_php_error.setIcon(self.style().standardIcon(QStyle.SP_MessageBoxCritical))
+        self.action_php_error.triggered.connect(lambda: self.open_log_in_notepad("logs/php_error.log"))
+        self.php_logs_menu.addAction(self.action_php_error)
+
+        self.mysql_logs_menu = self.logs_menu.addMenu("MariaDB")
+        mariadb_icon_path = os.path.join(BUNDLE_PATH, "mariadb.png")
+        if os.path.exists(mariadb_icon_path):
+            self.mysql_logs_menu.setIcon(QIcon(mariadb_icon_path))
+
+        self.action_mysql_error = QAction("", self)
+        self.action_mysql_error.setIcon(self.style().standardIcon(QStyle.SP_MessageBoxCritical))
+        self.action_mysql_error.triggered.connect(lambda: self.open_log_in_notepad("logs/mariadb.log"))
+        self.mysql_logs_menu.addAction(self.action_mysql_error)
+
+        self.redis_logs_menu = self.logs_menu.addMenu("Redis")
+        redis_icon_path = os.path.join(BUNDLE_PATH, "redis.png")
+        if os.path.exists(redis_icon_path):
+            self.redis_logs_menu.setIcon(QIcon(redis_icon_path))
+
+        self.action_redis_log = QAction("", self)
+        self.action_redis_log.setIcon(self.style().standardIcon(QStyle.SP_FileDialogInfoView))
+        self.action_redis_log.triggered.connect(lambda: self.open_log_in_notepad("server_log.txt"))
+        self.redis_logs_menu.addAction(self.action_redis_log)
+        self.btn_view_logs.setMenu(self.logs_menu)
 
         self.btn_redis_config = QPushButton()
         self.btn_redis_config.clicked.connect(lambda: self.open_config("redis", True))
@@ -876,6 +1257,9 @@ class ControlPanel(QWidget):
         self.log_label = QLabel()
         self.log_table = QTableWidget()
         self.log_table.setColumnCount(3)
+        self.search_input = QLineEdit()
+        self.search_input.textChanged.connect(self.load_logs)
+
         self.btn_clear_logs = QPushButton()
         self.btn_clear_logs.clicked.connect(self.clear_logs)
 
@@ -888,42 +1272,48 @@ class ControlPanel(QWidget):
         layout.setSpacing(10)
 
         # Baris 0: Bahasa & Browser
-        layout.addWidget(self.lang_selector, 0, 0, 1, 1)
-        layout.addWidget(self.btn_open_browser, 0, 1, 1, 1)
-        layout.addWidget(self.btn_minimize, 0, 2, 1, 1)
-        layout.addWidget(self.btn_scheduler_settings, 0, 3, 1, 1)
-        layout.addWidget(self.btn_port_configuration, 0, 4, 1, 1)
-        layout.addWidget(self.btn_mysql_password, 0, 5)
-
-        # Baris 1: Apache (Status, Run, Stop, Local, External)
-        layout.addWidget(self.apache_status, 1, 0, 1, 2)
-        layout.addWidget(self.btn_apache_toggle, 1, 2)
-        layout.addWidget(self.btn_apache_access_toggle, 1, 3)
-        layout.addWidget(self.btn_apache_config, 1, 4)
-        layout.addWidget(self.btn_apache_www, 1, 5)
-
-        # Baris 2: MySQL
-        layout.addWidget(self.mysql_status, 2, 0, 1, 2)
-        layout.addWidget(self.btn_mysql_toggle, 2, 2)
-        layout.addWidget(self.btn_mysql_access_toggle, 2, 3)
-        layout.addWidget(self.btn_mysql_config, 2, 4)
-        layout.addWidget(self.btn_mysql_pma, 2, 5)
+        layout.addWidget(self.lang_selector, 0, 2, 1, 1)
+        layout.addWidget(self.btn_open_browser, 0, 4, 1, 1)
+        layout.addWidget(self.btn_minimize, 0, 5, 1, 1)
         
-        # Baris 3: Redis
-        layout.addWidget(self.redis_status, 3, 0, 1, 2)
-        layout.addWidget(self.btn_redis_toggle, 3, 2)
-        layout.addWidget(self.btn_redis_access_toggle, 3, 3)
-        layout.addWidget(self.btn_redis_config, 3, 4)
-        layout.addWidget(self.btn_redis_cli, 3, 5)
+        layout.addWidget(self.btn_view_logs, 0, 3, 1, 1)
+        layout.addWidget(self.btn_scheduler_settings, 1, 2, 1, 1)
+        layout.addWidget(self.btn_startup_settings, 1, 3, 1, 1)
+        layout.addWidget(self.btn_port_configuration, 1, 4, 1, 1)
+        layout.addWidget(self.btn_mysql_password, 1, 5)
 
-        # Baris 4 dan 5: Global Settings
-        layout.addWidget(self.chk_run_startup, 4, 0, 1, 3)
-        layout.addWidget(self.chk_auto_start_services, 5, 0, 1, 3)
+        # Baris 2: Apache (Status, Run, Stop, Local, External)
+        layout.addWidget(self.apache_status, 2, 0, 1, 2)
+        layout.addWidget(self.btn_apache_toggle, 2, 2)
+        layout.addWidget(self.btn_apache_access_toggle, 2, 3)
+        layout.addWidget(self.btn_apache_config, 2, 4)
+        layout.addWidget(self.btn_apache_www, 2, 5)
 
-        # Baris 6-7: Logs
-        layout.addWidget(self.log_label, 6, 0, 1, 5)
-        layout.addWidget(self.btn_clear_logs, 6, 5)
-        layout.addWidget(self.log_table, 7, 0, 1, 6)
+        # Baris 3: MySQL
+        layout.addWidget(self.mysql_status, 3, 0, 1, 2)
+        layout.addWidget(self.btn_mysql_toggle, 3, 2)
+        layout.addWidget(self.btn_mysql_access_toggle, 3, 3)
+        layout.addWidget(self.btn_mysql_config, 3, 4)
+        layout.addWidget(self.btn_mysql_pma, 3, 5)
+        
+        # Baris 4: Redis
+        layout.addWidget(self.redis_status, 4, 0, 1, 2)
+        layout.addWidget(self.btn_redis_toggle, 4, 2)
+        layout.addWidget(self.btn_redis_access_toggle, 4, 3)
+        layout.addWidget(self.btn_redis_config, 4, 4)
+        layout.addWidget(self.btn_redis_cli, 4, 5)
+
+        # Baris 5 dan 6: Global Settings
+        layout.addWidget(self.chk_run_startup, 0, 0, 1, 2)
+        layout.addWidget(self.chk_auto_start_services, 1, 0, 1, 2)
+
+        # Baris 5: Label Log & Tombol Clear
+        layout.addWidget(self.log_label, 5, 0, 1, 5)
+        layout.addWidget(self.search_input, 5, 2, 1, 3)
+        layout.addWidget(self.btn_clear_logs, 5, 5)
+
+        # Baris 6: Tabel Log
+        layout.addWidget(self.log_table, 6, 0, 1, 6)
 
         self.setLayout(layout)
 
@@ -945,8 +1335,11 @@ class ControlPanel(QWidget):
             "mysql": int(get_setting('mysql_port', '3306')),
             "redis": int(get_setting('redis_port', '6379'))
         }
+        pid = int(get_setting(f"{name}_pid", "0"))
         
-        if is_port_in_use(port_map[name]):
+        # Gunakan kombinasi Port dan PID untuk deteksi yang lebih reliabel
+        # Jika salah satu aktif, maka kita anggap layanan sedang berjalan dan ingin dihentikan
+        if is_port_in_use(port_map[name]) or is_pid_running(pid):
             self.stop_service(name)
         else:
             self.run_service(name, path)
@@ -1017,7 +1410,9 @@ class ControlPanel(QWidget):
         # Update teks tombol MariaDB
         self.btn_mysql_config.setText(tr(lang, "btn_mysql_config"))
         self.btn_mysql_pma.setText(tr(lang, "btn_phpmyadmin"))
-        self.btn_mysql_password.setText(tr(lang, "btn_reset_mysql_password"))
+        self.btn_mysql_password.setText(tr(lang, "btn_set_password"))
+        self.action_mariadb_pass.setText(tr(lang, "menu_mariadb_password"))
+        self.action_redis_pass.setText(tr(lang, "menu_redis_password"))
 
         # Update teks tombol Redis
         self.btn_redis_config.setText(tr(lang, "btn_redis_config"))
@@ -1027,6 +1422,14 @@ class ControlPanel(QWidget):
         self.btn_minimize.setText(tr(lang, "btn_minimize"))
         self.btn_port_configuration.setText(tr(lang, "btn_port_configuration"))
         self.btn_scheduler_settings.setText(tr(lang, "btn_manage_scheduler"))
+        self.btn_startup_settings.setText(tr(lang, "btn_manage_startup"))
+
+        self.btn_view_logs.setText(tr(lang, "btn_view_logs"))
+        self.action_apache_error.setText(tr(lang, "log_error"))
+        self.action_apache_access.setText(tr(lang, "log_access"))
+        self.action_php_error.setText(tr(lang, "log_error"))
+        self.action_mysql_error.setText(tr(lang, "log_error"))
+        self.action_redis_log.setText(tr(lang, "log_general"))
 
         self.show_action.setText(tr(self.current_lang, "tray_menu_show"))
         self.minimize_action.setText(tr(self.current_lang, "tray_menu_minimize"))
@@ -1042,6 +1445,7 @@ class ControlPanel(QWidget):
 
         self.log_label.setText(tr(self.current_lang, "log_label"))
         self.btn_clear_logs.setText(tr(self.current_lang, "btn_clear_logs"))
+        self.search_input.setPlaceholderText(tr(self.current_lang, "help_search_logs"))
 
         self.log_table.setHorizontalHeaderLabels([
             tr(self.current_lang, "col_log_time"),
@@ -1059,6 +1463,13 @@ class ControlPanel(QWidget):
             self.current_lang = code
             set_setting('language', code)
             self.update_texts()
+
+    def open_log_in_notepad(self, relative_path):
+        path = os.path.join(BASE_PATH, relative_path)
+        if os.path.exists(path):
+            subprocess.Popen(["notepad.exe", path])
+        else:
+            QMessageBox.warning(self, tr(self.current_lang, "error_title"), tr(self.current_lang, "msg_file_not_found"))
 
     def change_access(self, name, external):
         if name == "apache": set_apache_access(external)
@@ -1098,19 +1509,39 @@ class ControlPanel(QWidget):
         """Fungsi mandiri untuk memperbarui seluruh elemen UI terkait satu layanan."""
         lang = self.current_lang
         
+        with self.busy_lock:
+            is_busy = name in self.busy_services
+            action = self.busy_services.get(name)
+        
         # 1. Deteksi Port dan Mode
         port_defaults = {"apache": "80", "mysql": "3306", "redis": "6379"}
-        port = int(get_setting(f"{name}_port", port_defaults[name]))
-        is_running = is_port_in_use(port)
-        is_online = get_setting(f"{name}_access_mode", "local") == "external"
+        port_val = get_setting(f"{name}_port", port_defaults[name])
+        try:
+            port = int(port_val)
+        except (ValueError, TypeError):
+            port = int(port_defaults[name])
 
+        # Periksa status berdasarkan Port ATAU PID untuk menghindari lag saat startup
+        pid = int(get_setting(f"{name}_pid", "0"))
+        is_running = is_port_in_use(port) or is_pid_running(pid)
+        
+        is_online = get_setting(f"{name}_access_mode", "local") == "external"
+        
         # 2. Update Tombol Start/Stop (Berbasis Aksi)
         run_key = f"btn_{name}_stop" if is_running else f"btn_{name}_run"
         run_text = tr(lang, run_key)
-        getattr(self, f"btn_{name}_toggle").setText(run_text)
+        
+        # 1.5. Update Button State (Busy vs Normal)
+        toggle_btn = getattr(self, f"btn_{name}_toggle")
+        toggle_btn.setEnabled(not is_busy)
+
+        if is_busy:
+            toggle_btn.setText(tr(lang, "btn_starting" if action == "start" else "btn_stopping"))
+        else:
+            toggle_btn.setText(run_text)
         
         tray_run = getattr(self, f"{name}_tray_run")
-        tray_run.setText(run_text)
+        tray_run.setText(tr(lang, "btn_starting" if action == "start" else "btn_stopping") if is_busy else run_text)
         run_icon = "stop.png" if is_running else "start.png"
         run_icon_path = os.path.join(BUNDLE_PATH, run_icon)
         if os.path.exists(run_icon_path):
@@ -1139,10 +1570,16 @@ class ControlPanel(QWidget):
         status_label = getattr(self, f"{name}_status")
         online_label = tr(lang, "status_public" if is_online else "status_local")
         
-        if is_running:
+        if is_busy:
+            # Gunakan status 'Running' sebagai basis jika sedang proses berhenti
+            status_key = f"{name}_status_running" if action == "stop" else f"{name}_status"
+            base_status = tr(lang, status_key)
+            label_text = f"{base_status}... ({tr(lang, 'btn_starting' if action == 'start' else 'btn_stopping')})"
+            style = "color: orange;"
+        elif is_running:
             base_status = tr(lang, f"{name}_status_running")
             label_text = f"{base_status} ({online_label})"
-            style = "color: green; font-weight: bold;"
+            style = "color: green;"
         else:
             base_status = tr(lang, f"{name}_status")
             label_text = f"{base_status} ({online_label})"
@@ -1197,8 +1634,16 @@ class ControlPanel(QWidget):
         dialog = SchedulerDialog(self)
         dialog.exec_()
 
+    def open_startup(self):
+        dialog = StartupDialog(self)
+        dialog.exec_()
+
     def open_mysql_password_dialog(self):
         dialog = MariaDBPasswordDialog(self)
+        dialog.exec_()
+
+    def open_redis_password_dialog(self):
+        dialog = RedisPasswordDialog(self)
         dialog.exec_()
 
     def apply_port_settings(self):
@@ -1228,6 +1673,39 @@ class ControlPanel(QWidget):
         for svc in ["apache", "mysql", "redis"]:
             self.stop_service(svc)
 
+    def _poll_service_status(self, name, target_state, timeout=30, interval=0.5):
+        """Memantau status layanan di thread terpisah hingga mencapai target atau timeout."""
+        start_time = time.time()
+        port_defaults = {"apache": "80", "mysql": "3306", "redis": "6379"}
+        
+        while time.time() - start_time < timeout:
+            port_val = get_setting(f"{name}_port", port_defaults[name])
+            try:
+                port = int(port_val)
+            except:
+                port = int(port_defaults[name])
+            
+            pid = int(get_setting(f"{name}_pid", "0"))
+            port_active = is_port_in_use(port)
+            pid_active = is_pid_running(pid)
+
+            if target_state: # Kita mencoba memulai layanan
+                # Konfirmasi berjalan jika port aktif DAN PID aktif
+                if port_active and pid_active:
+                    add_log(f"Service {name} confirmed running (Port active: {port_active}, PID active: {pid_active}).")
+                    break
+            else: # Kita mencoba menghentikan layanan
+                # Konfirmasi berhenti jika port TIDAK aktif DAN PID TIDAK aktif
+                if not port_active and not pid_active:
+                    add_log(f"Service {name} confirmed stopped (Port active: {port_active}, PID active: {pid_active}).")
+                    break
+            time.sleep(interval)
+        
+        else: # Blok ini dieksekusi jika loop selesai tanpa 'break' (yaitu, timeout)
+            add_log(f"Service {name} did not reach target state ({'running' if target_state else 'stopped'}) within {timeout} seconds. Current status: Port active={port_active}, PID active={pid_active}", "WARNING")
+        with self.busy_lock:
+            if name in self.busy_services: del self.busy_services[name]
+        self.service_status_changed.emit(name)
     def set_all_online(self):
         """Mengubah semua layanan ke Mode Publik (Online)."""
         add_log("Tray Action: Putting all services Online (Public Mode)...", "INFO")
@@ -1243,7 +1721,7 @@ class ControlPanel(QWidget):
         set_mysql_access(False, force=True)
         set_redis_access(False, force=True)
         self.update_service_status()
-
+        
     def initialize_mariadb(self):
         add_log("Checking MariaDB data directory...")
         data_dir = os.path.join(BASE_PATH, "data", "mysql")
@@ -1270,6 +1748,11 @@ class ControlPanel(QWidget):
         return True
 
     def run_service(self, name, path):
+        with self.busy_lock:
+            self.busy_services[name] = "start"
+        self.update_service_ui(name)
+        QApplication.processEvents() # Paksa UI untuk update teks "Starting..."
+
         service_root = os.path.dirname(os.path.dirname(path))
         
         # Port Check
@@ -1283,22 +1766,28 @@ class ControlPanel(QWidget):
 
         if not os.path.exists(path):
             add_log(f"FAILED: Path not found - {path}", "ERROR")
+            if name in self.busy_services: del self.busy_services[name]
             return
 
         if name == "mysql":
             if get_setting('mariadb_installed', '0') != '1':
                 if not self.initialize_mariadb():
+                    if name in self.busy_services: del self.busy_services[name]
                     return
 
         try:
             args = [path]
             if name == "apache":
+                replace_and_write("httpd-template.conf", os.path.join(BASE_PATH, "config", "httpd.conf"))
+                replace_and_write("php-template.ini", os.path.join(BASE_PATH, "php", "php.ini"))
                 conf = os.path.join(BASE_PATH, "config", "httpd.conf")
                 args.extend(["-f", conf])
             elif name == "mysql":
+                replace_and_write("my-template.ini", os.path.join(BASE_PATH, "config", "my.ini"))
                 conf = os.path.join(BASE_PATH, "config", "my.ini")
                 args.append(f"--defaults-file={conf}")
             elif name == "redis":
+                replace_and_write("redis.windows-service-template.conf", os.path.join(BASE_PATH, "redis", "redis.windows.conf"))
                 conf = os.path.join(BASE_PATH, "redis", "redis.windows.conf")
                 if os.path.exists(conf):
                     args.append(conf)
@@ -1314,12 +1803,27 @@ class ControlPanel(QWidget):
             
             set_setting(f"{name}_pid", str(proc.pid))
             add_log(f"SUCCESS: {name} started (PID: {proc.pid})")
+            # Mulai polling hingga layanan terdeteksi berjalan
+            
+            # Update UI segera setelah proses dimulai (tanpa menunggu polling port)
+            with self.busy_lock:
+                if name in self.busy_services: del self.busy_services[name]
+            self.service_status_changed.emit(name)
+            
+            poll_thread = threading.Thread(target=self._poll_service_status, args=(name, True), daemon=True)
+            poll_thread.start()
         except Exception as e:
             add_log(f"FAILED to start {name}: {str(e)}", "ERROR")
-        self.update_service_status()
+            with self.busy_lock:
+                if name in self.busy_services: del self.busy_services[name]
+            self.service_status_changed.emit(name)
 
     def stop_service(self, name):
+        with self.busy_lock:
+            self.busy_services[name] = "stop"
         add_log(f"Stopping service: {name}")
+        self.update_service_ui(name)
+        QApplication.processEvents() # Paksa UI untuk update teks "Stopping..."
 
         proc = getattr(self, f"{name}_proc")
         if proc and proc.poll() is None:
@@ -1358,14 +1862,57 @@ class ControlPanel(QWidget):
 
         setattr(self, f"{name}_proc", None)
         set_setting(f"{name}_pid", "0")
-        self.update_service_status()
+        
+        # Update UI segera setelah perintah stop dikirim
+        with self.busy_lock:
+            if name in self.busy_services: del self.busy_services[name]
+        self.service_status_changed.emit(name)
+        
+        # Mulai polling hingga layanan terdeteksi benar-benar berhenti
+        threading.Thread(target=self._poll_service_status, args=(name, False), daemon=True).start()
 
-    def load_logs(self):
-        self.log_table.setRowCount(0)
+    def run_startup_tasks(self):
+        """Menjalankan semua task startup yang aktif."""
+        add_log("Executing enabled startup tasks...")
         with db_lock:
             conn = sqlite3.connect(DB_PATH)
             cur = conn.cursor()
-            cur.execute("SELECT timestamp, level, message FROM logs ORDER BY id DESC LIMIT 100")
+            cur.execute("SELECT id, command FROM startup_tasks WHERE enabled=1")
+            tasks = cur.fetchall()
+            conn.close()
+        
+        for tid, cmd in tasks:
+            self.run_single_startup_task(tid, cmd)
+
+    def run_single_startup_task(self, task_id, command):
+        try:
+            proc = subprocess.Popen(command, shell=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            with db_lock:
+                conn = sqlite3.connect(DB_PATH)
+                cur = conn.cursor()
+                cur.execute("UPDATE startup_tasks SET pid=? WHERE id=?", (proc.pid, task_id))
+                conn.commit()
+                conn.close()
+            add_log(f"Startup task ID {task_id} started (PID: {proc.pid})")
+            return proc.pid
+        except Exception as e:
+            add_log(f"Failed to start startup task ID {task_id}: {str(e)}", "ERROR")
+            return 0
+
+    def load_logs(self):
+        self.log_table.setRowCount(0)
+        keyword = self.search_input.text().strip()
+        
+        with db_lock:
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            
+            if keyword:
+                query = "SELECT timestamp, level, message FROM logs WHERE message LIKE ? OR level LIKE ? ORDER BY id DESC LIMIT 100"
+                cur.execute(query, (f'%{keyword}%', f'%{keyword}%'))
+            else:
+                cur.execute("SELECT timestamp, level, message FROM logs ORDER BY id DESC LIMIT 100")
+                
             logs = cur.fetchall()
             conn.close()
             
@@ -1411,6 +1958,7 @@ if __name__ == "__main__":
         window = ControlPanel()
         if get_setting('auto_start_services', '0') == '1':
             window.start_all_services()
+        window.run_startup_tasks()
         if get_setting('start_minimized', '0') == '0':
             window.show()
             
