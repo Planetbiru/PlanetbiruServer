@@ -73,6 +73,7 @@ In summary, Planetbiru Server Control Panel stands out for its focus on portabil
     *   **Intelligent Status Detection:** Uses both port and process ID (PID) to ensure accurate UI representation and prevent misclicks, providing immediate feedback on actions.
 *   **Access Control:** Quickly toggle services between **Local Mode** (127.0.0.1) and **Public Mode** (0.0.0.0).
 *   **MariaDB Password Management:** Change or reset the MariaDB root password. Features a secure **Force Reset** protected by a hashed Administrator Password.
+*   **Redis Data Management:** Integrated access to the Redis CLI and a built-in **Redis Data Viewer**. The viewer allows for read-only inspection of keys (Strings, Lists, Sets, Hashes, ZSets) with a real-time search filter.
 *   **Precise Cron Scheduler:** Execute system commands or PHP scripts using cron expressions. Tasks run in the background without console windows. Status can be toggled directly from the UI.
 *   **Startup Task Manager:** Manage system commands that execute automatically when the panel opens. Includes real-time status monitoring (Running/Finished), PID tracking, and manual start/stop controls.
 *   **System Tray Integration:** Run in the background with dynamic tray icons. Control individual services via submenus featuring Start, Stop, Public, and Local status icons.
@@ -127,8 +128,12 @@ In summary, Planetbiru Server Control Panel stands out for its focus on portabil
 *   **`icon.ico`**: The primary application icon used for the main window, taskbar, and executable branding.
 
 ### System Tray & UI Assets
-These images provide visual feedback and intuitive controls within the system tray menu:
-*   **Service Branding** (`apache.png`, `mariadb.png`, `redis.png`): Used as icons for service-specific submenus in the tray.
+These images provide visual feedback and intuitive controls within both the system tray and the main application interface:
+*   **Service Branding** (`apache.png`, `mariadb.png`, `redis.png`, `php.png`): Used as icons for service-specific submenus in the tray and to identify actions within the main UI's dropdown menus:
+    *   **Configuration**: Apache and PHP icons identify web server and script engine settings.
+    *   **Password Management**: MariaDB and Redis icons identify which database credentials are being modified.
+    *   **Activity Logs**: Individual branding icons represent the log categories for each service.
+    *   **Redis Data**: The Redis icon identifies the CLI and Viewer tools.
 *   **Status Indicators**:
     *   `start.png` / `stop.png`: Dynamically updated icons representing whether a service is active or inactive.
     *   `public.png` / `local.png`: Visual cues for Public (0.0.0.0) vs. Local (127.0.0.1) access modes.
