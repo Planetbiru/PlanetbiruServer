@@ -1250,6 +1250,9 @@ class ControlPanel(QWidget):
         self.log_label = QLabel()
         self.log_table = QTableWidget()
         self.log_table.setColumnCount(3)
+        self.search_input = QLineEdit()
+        self.search_input.textChanged.connect(self.load_logs)
+
         self.btn_clear_logs = QPushButton()
         self.btn_clear_logs.clicked.connect(self.clear_logs)
 
@@ -1298,7 +1301,8 @@ class ControlPanel(QWidget):
         layout.addWidget(self.chk_auto_start_services, 1, 0, 1, 2)
 
         # Baris 7 dan 8: Logs
-        layout.addWidget(self.log_label, 5, 0, 1, 5)
+        layout.addWidget(self.log_label, 5, 0, 1, 1)
+        layout.addWidget(self.search_input, 5, 1, 1, 4)
         layout.addWidget(self.btn_clear_logs, 5, 5)
         layout.addWidget(self.log_table, 6, 0, 1, 6)
 
@@ -1429,6 +1433,7 @@ class ControlPanel(QWidget):
 
         self.log_label.setText(tr(self.current_lang, "log_label"))
         self.btn_clear_logs.setText(tr(self.current_lang, "btn_clear_logs"))
+        self.search_input.setPlaceholderText(tr(self.current_lang, "help_search_logs"))
 
         self.log_table.setHorizontalHeaderLabels([
             tr(self.current_lang, "col_log_time"),
@@ -1796,10 +1801,18 @@ class ControlPanel(QWidget):
 
     def load_logs(self):
         self.log_table.setRowCount(0)
+        keyword = self.search_input.text().strip()
+        
         with db_lock:
             conn = sqlite3.connect(DB_PATH)
             cur = conn.cursor()
-            cur.execute("SELECT timestamp, level, message FROM logs ORDER BY id DESC LIMIT 100")
+            
+            if keyword:
+                query = "SELECT timestamp, level, message FROM logs WHERE message LIKE ? OR level LIKE ? ORDER BY id DESC LIMIT 100"
+                cur.execute(query, (f'%{keyword}%', f'%{keyword}%'))
+            else:
+                cur.execute("SELECT timestamp, level, message FROM logs ORDER BY id DESC LIMIT 100")
+                
             logs = cur.fetchall()
             conn.close()
             
