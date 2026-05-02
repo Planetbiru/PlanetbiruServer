@@ -85,6 +85,8 @@ def replace_and_write(template_name, target_path):
         content = content.replace("{APACHE_PORT}", get_setting('apache_port', '80'))
         content = content.replace("{MYSQL_PORT}", get_setting('mysql_port', '3306'))
         content = content.replace("{REDIS_PORT}", get_setting('redis_port', '6379'))
+        # Tambahkan placeholder khusus untuk MariaDB basedir
+        content = content.replace("{MYSQL_HOME}", (clean_base + "/mysql").replace("//", "/"))
         
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
         with open(target_path, "w", encoding='utf-8') as f:
@@ -1865,30 +1867,55 @@ class ControlPanel(QWidget):
         set_redis_access(False, force=True)
         self.update_service_status()
         
+    def configure_mariadb(self):
+        """Menghasilkan file konfigurasi my.ini dari template."""
+        add_log("Configuring MariaDB environment...")
+        conf_path = os.path.join(BASE_PATH, "config", "my.ini")
+        replace_and_write("my-template.ini", conf_path)
+
     def initialize_mariadb(self):
-        add_log("Checking MariaDB data directory...")
-        data_dir = os.path.join(BASE_PATH, "data", "mysql")
-        system_db_dir = os.path.join(data_dir, "mysql")
+        add_log("Checking MariaDB data integrity...")
+        # data_root adalah folder 'data/mysql' (sesuai datadir di my.ini)
+        data_root = os.path.join(BASE_PATH, "data", "mysql")
+        # system_db_folder adalah folder 'mysql' di dalam data_root yang berisi tabel privilege
+        system_db_folder = os.path.join(data_root, "mysql")
         
-        if not os.path.exists(system_db_dir):
-            add_log("MariaDB system database not found. Starting installation...")
+        # Jika folder sistem 'mysql' sudah ada dan berisi file, lewati instalasi
+        if os.path.exists(system_db_folder) and os.path.isdir(system_db_folder):
+            if os.listdir(system_db_folder):
+                add_log("MariaDB system tables already exist. Skipping initialization.")
+                return True
+
+        add_log("MariaDB system tables missing or empty. Starting initialization...")
+        try:
+            os.makedirs(data_root, exist_ok=True)
+            self.configure_mariadb()
+            
             install_bin = os.path.join(BASE_PATH, "mysql", "bin", "mariadb-install-db.exe")
             if not os.path.exists(install_bin):
-                add_log("CRITICAL: mariadb-install-db.exe not found!", "ERROR")
+                add_log("CRITICAL: mariadb-install-db.exe missing!", "ERROR")
                 return False
             
-            try:
-                # Menjalankan proses inisialisasi secara sinkron (menunggu selesai)
-                subprocess.run([install_bin, f"--datadir={data_dir}"], 
-                               cwd=os.path.join(BASE_PATH, "mysql"),
-                               creationflags=subprocess.CREATE_NO_WINDOW,
-                               check=True)
-                add_log("MariaDB installation completed successfully.")
+            # Gunakan data_root sebagai --datadir. 
+            # mariadb-install-db akan membuat folder 'mysql' di dalamnya secara otomatis.
+            res = subprocess.run(
+                [install_bin, f"--datadir={data_root.replace('\\', '/')}"],
+                cwd=os.path.join(BASE_PATH, "mysql"),
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            
+            if res.returncode == 0:
+                add_log("MariaDB data directory initialized successfully.")
+                set_setting('mariadb_installed', '1')
                 return True
-            except Exception as e:
-                add_log(f"MariaDB installation failed: {str(e)}", "ERROR")
+            else:
+                add_log(f"MariaDB installation error: {res.stderr.strip()}", "ERROR")
                 return False
-        return True
+        except Exception as e:
+            add_log(f"MariaDB initialization exception: {str(e)}", "ERROR")
+            return False
 
     def run_service(self, name, path):
         with self.busy_lock:
@@ -1919,10 +1946,12 @@ class ControlPanel(QWidget):
             return
 
         if name == "mysql":
-            if get_setting('mariadb_installed', '0') != '1':
-                if not self.initialize_mariadb():
+            # Selalu cek keberadaan direktori sebelum start
+            if not self.initialize_mariadb():
+                with self.busy_lock:
                     if name in self.busy_services: del self.busy_services[name]
-                    return
+                self.service_status_changed.emit(name)
+                return
 
         try:
             args = [path]
