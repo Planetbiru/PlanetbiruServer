@@ -754,10 +754,11 @@ class RedisViewerDialog(QDialog):
 
         # Table Area
         self.table = QTableWidget()
-        self.table.setColumnCount(3)
+        self.table.setColumnCount(4)
         self.table.setHorizontalHeaderLabels([
             tr(lang, "col_redis_key"),
             tr(lang, "col_redis_type"),
+            tr(lang, "col_redis_ttl"),
             tr(lang, "col_redis_value")
         ])
         self.table.setEditTriggers(QTableWidget.NoEditTriggers) # Read-only
@@ -819,6 +820,9 @@ class RedisViewerDialog(QDialog):
             # Get Type
             rtype = self.run_redis_cmd(["type", key]) or "unknown"
             
+            # Get TTL
+            rttl = self.run_redis_cmd(["ttl", key]) or "-1"
+            
             # Get Value based on type
             val = ""
             if rtype == "string":
@@ -836,7 +840,8 @@ class RedisViewerDialog(QDialog):
             self.table.insertRow(row)
             self.table.setItem(row, 0, QTableWidgetItem(key))
             self.table.setItem(row, 1, QTableWidgetItem(rtype))
-            self.table.setItem(row, 2, QTableWidgetItem(str(val)))
+            self.table.setItem(row, 2, QTableWidgetItem(rttl))
+            self.table.setItem(row, 3, QTableWidgetItem(str(val)))
         
         self.table.resizeColumnsToContents()
 
