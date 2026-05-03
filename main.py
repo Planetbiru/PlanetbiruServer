@@ -747,6 +747,13 @@ class RedisViewerDialog(QDialog):
         self.filter_input.textChanged.connect(self.filter_data)
         filter_layout.addWidget(QLabel(tr(lang, "lbl_search_logs")))
         filter_layout.addWidget(self.filter_input)
+
+        filter_layout.addWidget(QLabel(tr(lang, "lbl_redis_db")))
+        self.db_selector = QComboBox()
+        for i in range(16):
+            self.db_selector.addItem(str(i))
+        self.db_selector.currentIndexChanged.connect(self.load_data)
+        filter_layout.addWidget(self.db_selector)
         
         self.btn_refresh = QPushButton(tr(lang, "btn_refresh"))
         self.btn_refresh.clicked.connect(self.load_data)
@@ -775,13 +782,16 @@ class RedisViewerDialog(QDialog):
     def get_redis_cli_path(self):
         return os.path.join(BASE_PATH, "redis", "redis-cli.exe")
 
-    def run_redis_cmd(self, args):
+    def run_redis_cmd(self, args, db_index=None):
         cli = self.get_redis_cli_path()
         if not os.path.exists(cli):
             return None
         
         port = get_setting('redis_port', '6379')
         cmd = [cli, "-p", port]
+
+        if db_index is not None:
+            cmd.extend(["-n", str(db_index)])
         
         # Cek password dari config
         pwd = self.get_password_from_conf()
@@ -812,31 +822,32 @@ class RedisViewerDialog(QDialog):
 
     def load_data(self):
         self.table.setRowCount(0)
+        db_idx = self.db_selector.currentIndex()
         # Get all keys
-        keys_raw = self.run_redis_cmd(["keys", "*"])
+        keys_raw = self.run_redis_cmd(["keys", "*"], db_index=db_idx)
         if not keys_raw:
             return
 
         keys = keys_raw.splitlines()
         for key in keys:
             # Get Type
-            rtype = self.run_redis_cmd(["type", key]) or "unknown"
+            rtype = self.run_redis_cmd(["type", key], db_index=db_idx) or "unknown"
             
             # Get TTL
-            rttl = self.run_redis_cmd(["ttl", key]) or "-1"
+            rttl = self.run_redis_cmd(["ttl", key], db_index=db_idx) or "-1"
             
             # Get Value based on type
             val = ""
             if rtype == "string":
-                val = self.run_redis_cmd(["get", key])
+                val = self.run_redis_cmd(["get", key], db_index=db_idx)
             elif rtype == "list":
-                val = self.run_redis_cmd(["lrange", key, "0", "-1"])
+                val = self.run_redis_cmd(["lrange", key, "0", "-1"], db_index=db_idx)
             elif rtype == "set":
-                val = self.run_redis_cmd(["smembers", key])
+                val = self.run_redis_cmd(["smembers", key], db_index=db_idx)
             elif rtype == "hash":
-                val = self.run_redis_cmd(["hgetall", key])
+                val = self.run_redis_cmd(["hgetall", key], db_index=db_idx)
             elif rtype == "zset":
-                val = self.run_redis_cmd(["zrange", key, "0", "-1"])
+                val = self.run_redis_cmd(["zrange", key, "0", "-1"], db_index=db_idx)
             
             row = self.table.rowCount()
             self.table.insertRow(row)
