@@ -1286,7 +1286,7 @@ class ControlPanel(QWidget):
 
         # Tombol Buka Browser
         self.btn_open_browser = QPushButton()
-        self.btn_open_browser.clicked.connect(lambda: webbrowser.open("http://localhost/"))
+        self.btn_open_browser.clicked.connect(lambda: self.open_url_with_port("/"))
 
         # Tombol Port Settings
         self.btn_port_configuration = QPushButton()
@@ -1318,7 +1318,7 @@ class ControlPanel(QWidget):
         self.btn_mysql_config = QPushButton()
         self.btn_mysql_config.clicked.connect(lambda: self.open_config("mysql", True))
         self.btn_mysql_pma = QPushButton()
-        self.btn_mysql_pma.clicked.connect(lambda: webbrowser.open(f"http://localhost:{get_setting('apache_port', '80')}/phpMyAdmin"))
+        self.btn_mysql_pma.clicked.connect(lambda: self.open_url_with_port("/phpMyAdmin"))
 
         self.btn_mysql_password = QPushButton()
         self.password_menu = QMenu(self)
@@ -1478,6 +1478,14 @@ class ControlPanel(QWidget):
         self.status_timer = QTimer()
         self.status_timer.timeout.connect(self.update_service_status)
         self.status_timer.start(2000)
+
+    def open_url_with_port(self, path):
+        port = get_setting('apache_port', '80')
+        url = "http://localhost"
+        if port != '80':
+            url += f":{port}"
+        url += path
+        webbrowser.open(url)
 
     def toggle_service_action(self, name, path):
         port_map = {
