@@ -342,7 +342,7 @@ class SettingsDialog(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
         self.parent = parent
-        self.setWindowTitle(tr(parent.current_lang, "port_configuration_title"))
+        self.setWindowTitle(tr(parent.current_lang, "configuration_title"))
         self.setModal(True)
         self.resize(300, 200)
         
@@ -363,13 +363,18 @@ class SettingsDialog(QDialog):
         self.redis_port.setToolTip(tr(parent.current_lang, "help_redis_port"))
         layout.addWidget(self.redis_port, 2, 1)
         
+        layout.addWidget(QLabel(tr(parent.current_lang, "lbl_app_id")), 3, 0)
+        self.app_id = QLineEdit(get_setting('app_id', 'planetbiruserver'))
+        self.app_id.setToolTip(tr(parent.current_lang, "help_redis_port"))
+        layout.addWidget(self.app_id, 3, 1)
+        
         self.btn_default = QPushButton(tr(parent.current_lang, "btn_default"))
         self.btn_default.clicked.connect(self.set_defaults)
-        layout.addWidget(self.btn_default, 3, 0)
+        layout.addWidget(self.btn_default, 4, 0)
 
         self.btn_save = QPushButton(tr(parent.current_lang, "btn_save"))
         self.btn_save.clicked.connect(self.save)
-        layout.addWidget(self.btn_save, 3, 1)
+        layout.addWidget(self.btn_save, 4, 1)
 
         self.setLayout(layout)
         direction = self.parent.get_lang_dir(self.parent.current_lang)
@@ -379,6 +384,7 @@ class SettingsDialog(QDialog):
         set_setting('apache_port', self.apache_port.text())
         set_setting('mysql_port', self.mysql_port.text())
         set_setting('redis_port', self.redis_port.text())
+        set_setting('app_id', self.app_id.text())
         self.parent.apply_port_settings()
         self.accept()
 
@@ -386,6 +392,7 @@ class SettingsDialog(QDialog):
         self.apache_port.setText('80')
         self.mysql_port.setText('3306')
         self.redis_port.setText('6379')
+        self.app_id.setText('planetbiruserver')
 
 class SchedulerDialog(QDialog):
     def __init__(self, parent):
@@ -747,6 +754,13 @@ class RedisViewerDialog(QDialog):
         self.filter_input.textChanged.connect(self.filter_data)
         filter_layout.addWidget(QLabel(tr(lang, "lbl_search_logs")))
         filter_layout.addWidget(self.filter_input)
+
+        filter_layout.addWidget(QLabel(tr(lang, "lbl_redis_db")))
+        self.db_selector = QComboBox()
+        for i in range(16):
+            self.db_selector.addItem(str(i))
+        self.db_selector.currentIndexChanged.connect(self.load_data)
+        filter_layout.addWidget(self.db_selector)
         
         self.btn_refresh = QPushButton(tr(lang, "btn_refresh"))
         self.btn_refresh.clicked.connect(self.load_data)
@@ -775,13 +789,16 @@ class RedisViewerDialog(QDialog):
     def get_redis_cli_path(self):
         return os.path.join(BASE_PATH, "redis", "redis-cli.exe")
 
-    def run_redis_cmd(self, args):
+    def run_redis_cmd(self, args, db_index=None):
         cli = self.get_redis_cli_path()
         if not os.path.exists(cli):
             return None
         
         port = get_setting('redis_port', '6379')
         cmd = [cli, "-p", port]
+
+        if db_index is not None:
+            cmd.extend(["-n", str(db_index)])
         
         # Cek password dari config
         pwd = self.get_password_from_conf()
@@ -812,31 +829,32 @@ class RedisViewerDialog(QDialog):
 
     def load_data(self):
         self.table.setRowCount(0)
+        db_idx = self.db_selector.currentIndex()
         # Get all keys
-        keys_raw = self.run_redis_cmd(["keys", "*"])
+        keys_raw = self.run_redis_cmd(["keys", "*"], db_index=db_idx)
         if not keys_raw:
             return
 
         keys = keys_raw.splitlines()
         for key in keys:
             # Get Type
-            rtype = self.run_redis_cmd(["type", key]) or "unknown"
+            rtype = self.run_redis_cmd(["type", key], db_index=db_idx) or "unknown"
             
             # Get TTL
-            rttl = self.run_redis_cmd(["ttl", key]) or "-1"
+            rttl = self.run_redis_cmd(["ttl", key], db_index=db_idx) or "-1"
             
             # Get Value based on type
             val = ""
             if rtype == "string":
-                val = self.run_redis_cmd(["get", key])
+                val = self.run_redis_cmd(["get", key], db_index=db_idx)
             elif rtype == "list":
-                val = self.run_redis_cmd(["lrange", key, "0", "-1"])
+                val = self.run_redis_cmd(["lrange", key, "0", "-1"], db_index=db_idx)
             elif rtype == "set":
-                val = self.run_redis_cmd(["smembers", key])
+                val = self.run_redis_cmd(["smembers", key], db_index=db_idx)
             elif rtype == "hash":
-                val = self.run_redis_cmd(["hgetall", key])
+                val = self.run_redis_cmd(["hgetall", key], db_index=db_idx)
             elif rtype == "zset":
-                val = self.run_redis_cmd(["zrange", key, "0", "-1"])
+                val = self.run_redis_cmd(["zrange", key, "0", "-1"], db_index=db_idx)
             
             row = self.table.rowCount()
             self.table.insertRow(row)
@@ -1275,11 +1293,11 @@ class ControlPanel(QWidget):
 
         # Tombol Buka Browser
         self.btn_open_browser = QPushButton()
-        self.btn_open_browser.clicked.connect(lambda: webbrowser.open("http://localhost/"))
+        self.btn_open_browser.clicked.connect(lambda: self.open_url_with_port("/"))
 
         # Tombol Port Settings
-        self.btn_port_configuration = QPushButton()
-        self.btn_port_configuration.clicked.connect(self.open_settings)
+        self.btn_app_configuration = QPushButton()
+        self.btn_app_configuration.clicked.connect(self.open_settings)
 
         # Tombol Scheduler Settings
         self.btn_scheduler_settings = QPushButton()
@@ -1307,7 +1325,7 @@ class ControlPanel(QWidget):
         self.btn_mysql_config = QPushButton()
         self.btn_mysql_config.clicked.connect(lambda: self.open_config("mysql", True))
         self.btn_mysql_pma = QPushButton()
-        self.btn_mysql_pma.clicked.connect(lambda: webbrowser.open(f"http://localhost:{get_setting('apache_port', '80')}/phpMyAdmin"))
+        self.btn_mysql_pma.clicked.connect(lambda: self.open_url_with_port("/phpMyAdmin"))
 
         self.btn_mysql_password = QPushButton()
         self.password_menu = QMenu(self)
@@ -1418,7 +1436,7 @@ class ControlPanel(QWidget):
         layout.addWidget(self.btn_view_logs, 0, 3, 1, 1)
         layout.addWidget(self.btn_scheduler_settings, 1, 2, 1, 1)
         layout.addWidget(self.btn_startup_settings, 1, 3, 1, 1)
-        layout.addWidget(self.btn_port_configuration, 1, 4, 1, 1)
+        layout.addWidget(self.btn_app_configuration, 1, 4, 1, 1)
         layout.addWidget(self.btn_mysql_password, 1, 5)
 
         # Baris 2: Apache (Status, Run, Stop, Local, External)
@@ -1467,6 +1485,14 @@ class ControlPanel(QWidget):
         self.status_timer = QTimer()
         self.status_timer.timeout.connect(self.update_service_status)
         self.status_timer.start(2000)
+
+    def open_url_with_port(self, path):
+        port = get_setting('apache_port', '80')
+        url = "http://localhost"
+        if port != '80':
+            url += f":{port}"
+        url += path
+        webbrowser.open(url)
 
     def toggle_service_action(self, name, path):
         port_map = {
@@ -1561,7 +1587,7 @@ class ControlPanel(QWidget):
 
         self.btn_open_browser.setText(tr(lang, "btn_open_browser"))
         self.btn_minimize.setText(tr(lang, "btn_minimize"))
-        self.btn_port_configuration.setText(tr(lang, "btn_port_configuration"))
+        self.btn_app_configuration.setText(tr(lang, "btn_app_configuration"))
         self.btn_scheduler_settings.setText(tr(lang, "btn_manage_scheduler"))
         self.btn_startup_settings.setText(tr(lang, "btn_manage_startup"))
 
@@ -2114,7 +2140,7 @@ if __name__ == "__main__":
     try:
         # Fix agar ikon muncul di taskbar & title bar pada Windows
         if os.name == 'nt':
-            myappid = 'kamshory.portableserver.panel.1.0'
+            myappid = get_setting('appid', 'planetbiruserver')
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 
         app = QApplication(sys.argv)
