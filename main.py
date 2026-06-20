@@ -342,7 +342,7 @@ class SettingsDialog(QDialog):
     def __init__(self, parent):
         super().__init__(parent)
         self.parent = parent
-        self.setWindowTitle(tr(parent.current_lang, "port_configuration_title"))
+        self.setWindowTitle(tr(parent.current_lang, "configuration_title"))
         self.setModal(True)
         self.resize(300, 200)
         
@@ -363,13 +363,18 @@ class SettingsDialog(QDialog):
         self.redis_port.setToolTip(tr(parent.current_lang, "help_redis_port"))
         layout.addWidget(self.redis_port, 2, 1)
         
+        layout.addWidget(QLabel(tr(parent.current_lang, "lbl_app_id")), 3, 0)
+        self.app_id = QLineEdit(get_setting('app_id', 'planetbiruserver'))
+        self.app_id.setToolTip(tr(parent.current_lang, "help_redis_port"))
+        layout.addWidget(self.app_id, 3, 1)
+        
         self.btn_default = QPushButton(tr(parent.current_lang, "btn_default"))
         self.btn_default.clicked.connect(self.set_defaults)
-        layout.addWidget(self.btn_default, 3, 0)
+        layout.addWidget(self.btn_default, 4, 0)
 
         self.btn_save = QPushButton(tr(parent.current_lang, "btn_save"))
         self.btn_save.clicked.connect(self.save)
-        layout.addWidget(self.btn_save, 3, 1)
+        layout.addWidget(self.btn_save, 4, 1)
 
         self.setLayout(layout)
         direction = self.parent.get_lang_dir(self.parent.current_lang)
@@ -379,6 +384,7 @@ class SettingsDialog(QDialog):
         set_setting('apache_port', self.apache_port.text())
         set_setting('mysql_port', self.mysql_port.text())
         set_setting('redis_port', self.redis_port.text())
+        set_setting('app_id', self.app_id.text())
         self.parent.apply_port_settings()
         self.accept()
 
@@ -386,6 +392,7 @@ class SettingsDialog(QDialog):
         self.apache_port.setText('80')
         self.mysql_port.setText('3306')
         self.redis_port.setText('6379')
+        self.app_id.setText('planetbiruserver')
 
 class SchedulerDialog(QDialog):
     def __init__(self, parent):
@@ -1289,8 +1296,8 @@ class ControlPanel(QWidget):
         self.btn_open_browser.clicked.connect(lambda: self.open_url_with_port("/"))
 
         # Tombol Port Settings
-        self.btn_port_configuration = QPushButton()
-        self.btn_port_configuration.clicked.connect(self.open_settings)
+        self.btn_app_configuration = QPushButton()
+        self.btn_app_configuration.clicked.connect(self.open_settings)
 
         # Tombol Scheduler Settings
         self.btn_scheduler_settings = QPushButton()
@@ -1429,7 +1436,7 @@ class ControlPanel(QWidget):
         layout.addWidget(self.btn_view_logs, 0, 3, 1, 1)
         layout.addWidget(self.btn_scheduler_settings, 1, 2, 1, 1)
         layout.addWidget(self.btn_startup_settings, 1, 3, 1, 1)
-        layout.addWidget(self.btn_port_configuration, 1, 4, 1, 1)
+        layout.addWidget(self.btn_app_configuration, 1, 4, 1, 1)
         layout.addWidget(self.btn_mysql_password, 1, 5)
 
         # Baris 2: Apache (Status, Run, Stop, Local, External)
@@ -1580,7 +1587,7 @@ class ControlPanel(QWidget):
 
         self.btn_open_browser.setText(tr(lang, "btn_open_browser"))
         self.btn_minimize.setText(tr(lang, "btn_minimize"))
-        self.btn_port_configuration.setText(tr(lang, "btn_port_configuration"))
+        self.btn_app_configuration.setText(tr(lang, "btn_app_configuration"))
         self.btn_scheduler_settings.setText(tr(lang, "btn_manage_scheduler"))
         self.btn_startup_settings.setText(tr(lang, "btn_manage_startup"))
 
@@ -2133,7 +2140,7 @@ if __name__ == "__main__":
     try:
         # Fix agar ikon muncul di taskbar & title bar pada Windows
         if os.name == 'nt':
-            myappid = 'kamshory.portableserver.panel.1.0'
+            myappid = get_setting('appid', 'planetbiruserver')
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 
         app = QApplication(sys.argv)
