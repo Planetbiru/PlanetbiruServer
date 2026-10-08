@@ -6,8 +6,19 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QPushButton, QLabel,
                              QGridLayout, QLineEdit, QTableWidget, QTableWidgetItem, QCheckBox,
                              QComboBox, QMessageBox, QInputDialog,
                              QSystemTrayIcon, QMenu, QAction, QStyle, QDialog, QHBoxLayout, QVBoxLayout)
+from PyQt5.QtWidgets import (QApplication, QWidget, QPushButton, QLabel,
+                             QGridLayout, QLineEdit, QTableWidget, QTableWidgetItem, QCheckBox,
+                             QComboBox, QMessageBox, QInputDialog, QToolButton,
+                             QSystemTrayIcon, QMenu, QAction, QStyle, QDialog, QHBoxLayout, QVBoxLayout)
 from PyQt5.QtGui import QIcon
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QUrl
+
+# --- WebEngine (mini browser) ---
+try:
+    from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineProfile, QWebEngineSettings
+    WEBENGINE_AVAILABLE = True
+except ImportError:
+    WEBENGINE_AVAILABLE = False
 
 if getattr(sys, 'frozen', False):
     # Lokasi folder tempat file .exe berada (untuk DB, INI, dan folder server)
@@ -78,10 +89,10 @@ def replace_and_write(template_name, target_path):
         with open(template_path, "r", encoding='utf-8') as f:
             content = f.read()
         
-        # Replace ${INSTALL_DIR} dengan BASE_PATH (menggunakan forward slash untuk config)
+        # Replace {INSTALL_DIR} dengan BASE_PATH (menggunakan forward slash untuk config)
         clean_base = BASE_PATH.replace("\\", "/")
         content = content.replace("{ROOT}", clean_base)
-        content = content.replace("${INSTALL_DIR}", clean_base)
+        content = content.replace("{INSTALL_DIR}", clean_base)
         content = content.replace("{APACHE_PORT}", get_setting('apache_port', '80'))
         content = content.replace("{MYSQL_PORT}", get_setting('mysql_port', '3306'))
         content = content.replace("{REDIS_PORT}", get_setting('redis_port', '6379'))
@@ -1093,6 +1104,154 @@ class RedisPasswordDialog(QDialog):
         except Exception as e:
             QMessageBox.critical(self, tr(lang, "error_title"), str(e))
 
+class MiniBrowserDialog(QDialog):
+    """Mini browser berbasis Chromium (engine yang sama dengan Microsoft Edge)
+    untuk mengakses server localhost dan phpMyAdmin dari dalam aplikasi."""
+
+    def __init__(self, parent, initial_url=None):
+        super().__init__(parent)
+        self.parent = parent
+        lang = parent.current_lang
+        self.setWindowTitle(tr(lang, "mini_browser_title"))
+        self.setModal(False)  # non-modal agar panel utama tetap bisa dipakai
+        self.resize(1100, 750)
+
+        layout = QVBoxLayout()
+        layout.setContentsMargins(6, 6, 6, 6)
+
+        # ---------- Toolbar Navigasi ----------
+        toolbar = QHBoxLayout()
+
+        self.btn_back = QPushButton("◀")
+        self.btn_back.setFixedWidth(36)
+        self.btn_back.clicked.connect(lambda: self.browser.back())
+
+        self.btn_forward = QPushButton("▶")
+        self.btn_forward.setFixedWidth(36)
+        self.btn_forward.clicked.connect(lambda: self.browser.forward())
+
+        self.btn_reload = QPushButton("⟳")
+        self.btn_reload.setFixedWidth(36)
+        self.btn_reload.clicked.connect(lambda: self.browser.reload())
+
+        self.btn_home = QPushButton("🏠")
+        self.btn_home.setFixedWidth(36)
+        self.btn_home.clicked.connect(self.go_home)
+
+        self.url_input = QLineEdit()
+        self.url_input.returnPressed.connect(self.navigate_to_input)
+
+        self.btn_go = QPushButton(tr(lang, "btn_go"))
+        self.btn_go.clicked.connect(self.navigate_to_input)
+
+        toolbar.addWidget(self.btn_back)
+        toolbar.addWidget(self.btn_forward)
+        toolbar.addWidget(self.btn_reload)
+        toolbar.addWidget(self.btn_home)
+        toolbar.addWidget(self.url_input, 1)
+        toolbar.addWidget(self.btn_go)
+        layout.addLayout(toolbar)
+
+        # ---------- Quick Links ----------
+        quick_layout = QHBoxLayout()
+
+        self.btn_ql_localhost = QPushButton(tr(lang, "btn_open_browser"))
+        self.btn_ql_localhost.clicked.connect(
+            lambda: self.navigate(self.get_base_url() + "/"))
+
+        self.btn_ql_pma = QPushButton(tr(lang, "btn_phpmyadmin"))
+        self.btn_ql_pma.clicked.connect(
+            lambda: self.navigate(self.get_base_url() + "/phpMyAdmin"))
+
+        self.btn_ql_www = QPushButton(tr(lang, "btn_open_www"))
+        self.btn_ql_www.clicked.connect(
+            lambda: self.navigate(self.get_base_url() + "/"))
+
+        quick_layout.addWidget(self.btn_ql_localhost)
+        quick_layout.addWidget(self.btn_ql_pma)
+        quick_layout.addWidget(self.btn_ql_www)
+        quick_layout.addStretch()
+
+        # Buka di browser eksternal
+        self.btn_external = QPushButton(tr(lang, "btn_open_external"))
+        self.btn_external.clicked.connect(self.open_in_external_browser)
+        quick_layout.addWidget(self.btn_external)
+
+        layout.addLayout(quick_layout)
+
+        # ---------- Web View ----------
+        self.browser = QWebEngineView()
+        # Izinkan akses ke localhost / self-signed cert (berguna untuk dev)
+        try:
+            settings = self.browser.settings()
+            settings.setAttribute(QWebEngineSettings.LocalContentCanAccessRemoteUrls, True)
+            settings.setAttribute(QWebEngineSettings.LocalContentCanAccessFileUrls, True)
+            settings.setAttribute(QWebEngineSettings.JavascriptEnabled, True)
+        except Exception:
+            pass
+
+        self.browser.urlChanged.connect(self.on_url_changed)
+        self.browser.loadFinished.connect(self.on_load_finished)
+        self.browser.titleChanged.connect(self.on_title_changed)
+
+        layout.addWidget(self.browser, 1)
+        self.setLayout(layout)
+
+        direction = self.parent.get_lang_dir(lang)
+        self.setLayoutDirection(Qt.RightToLeft if direction == 'rtl' else Qt.LeftToRight)
+
+        # Navigasi awal
+        self.home_url = initial_url or (self.get_base_url() + "/")
+        self.navigate(self.home_url)
+
+    # ---------- Helpers ----------
+    def get_base_url(self):
+        port = get_setting('apache_port', '80')
+        url = "http://localhost"
+        if port != '80':
+            url += f":{port}"
+        return url
+
+    def navigate(self, url):
+        if not url:
+            return
+        if not url.startswith(("http://", "https://", "file://")):
+            url = "http://" + url
+        self.browser.setUrl(QUrl(url))
+
+    def navigate_to_input(self):
+        self.navigate(self.url_input.text().strip())
+
+    def go_home(self):
+        self.navigate(self.home_url)
+
+    def open_in_external_browser(self):
+        webbrowser.open(self.browser.url().toString())
+
+    # ---------- Signals ----------
+    def on_url_changed(self, url):
+        self.url_input.setText(url.toString())
+        try:
+            self.btn_back.setEnabled(self.browser.history().canGoBack())
+            self.btn_forward.setEnabled(self.browser.history().canGoForward())
+        except Exception:
+            pass
+
+    def on_load_finished(self, ok):
+        if not ok:
+            # Halaman gagal dimuat — tampilkan pesan informatif
+            self.browser.setHtml(f"""
+                <html><body style='font-family: sans-serif; padding: 40px;'>
+                <h2 style='color:#c0392b;'>{tr(self.parent.current_lang, 'mini_browser_load_failed')}</h2>
+                <p>{self.browser.url().toString()}</p>
+                <p>{tr(self.parent.current_lang, 'mini_browser_load_failed_hint')}</p>
+                </body></html>
+            """)
+
+    def on_title_changed(self, title):
+        base = tr(self.parent.current_lang, "mini_browser_title")
+        self.setWindowTitle(f"{title} — {base}" if title else base)
+
 class ControlPanel(QWidget):
     service_status_changed = pyqtSignal(str) # Signal harus didefinisikan di level kelas
 
@@ -1295,6 +1454,22 @@ class ControlPanel(QWidget):
         self.btn_open_browser = QPushButton()
         self.btn_open_browser.clicked.connect(lambda: self.open_url_with_port("/"))
 
+        # Tombol Buka Browser (eksternal)
+        self.btn_open_browser = QPushButton()
+        self.btn_open_browser.clicked.connect(lambda: self.open_url_with_port("/"))
+
+        # --- Mini Browser (internal, berbasis Chromium/Edge engine) ---
+        self.btn_mini_browser = QPushButton()
+        self.btn_mini_browser.clicked.connect(self.open_mini_browser)
+        if not WEBENGINE_AVAILABLE:
+            self.btn_mini_browser.setEnabled(False)
+            self.btn_mini_browser.setToolTip("PyQtWebEngine tidak terinstall. Jalankan: pip install PyQtWebEngine")
+
+        self.btn_mini_pma = QPushButton()
+        self.btn_mini_pma.clicked.connect(lambda: self.open_mini_browser("/phpMyAdmin"))
+        if not WEBENGINE_AVAILABLE:
+            self.btn_mini_pma.setEnabled(False)
+
         # Tombol Port Settings
         self.btn_app_configuration = QPushButton()
         self.btn_app_configuration.clicked.connect(self.open_settings)
@@ -1432,6 +1607,7 @@ class ControlPanel(QWidget):
         layout.addWidget(self.lang_selector, 0, 2, 1, 1)
         layout.addWidget(self.btn_open_browser, 0, 4, 1, 1)
         layout.addWidget(self.btn_minimize, 0, 5, 1, 1)
+        layout.addWidget(self.btn_mini_browser, 0, 6, 1, 1)
         
         layout.addWidget(self.btn_view_logs, 0, 3, 1, 1)
         layout.addWidget(self.btn_scheduler_settings, 1, 2, 1, 1)
@@ -1452,6 +1628,7 @@ class ControlPanel(QWidget):
         layout.addWidget(self.btn_mysql_access_toggle, 3, 3)
         layout.addWidget(self.btn_mysql_config, 3, 4)
         layout.addWidget(self.btn_mysql_pma, 3, 5)
+        layout.addWidget(self.btn_mini_pma, 3, 6)
         
         # Baris 4: Redis
         layout.addWidget(self.redis_status, 4, 0, 1, 2)
@@ -1470,7 +1647,7 @@ class ControlPanel(QWidget):
         layout.addWidget(self.btn_clear_logs, 5, 5)
 
         # Baris 6: Tabel Log
-        layout.addWidget(self.log_table, 6, 0, 1, 6)
+        layout.addWidget(self.log_table, 6, 0, 1, 7)
 
         self.setLayout(layout)
 
@@ -1613,6 +1790,9 @@ class ControlPanel(QWidget):
         self.log_label.setText(tr(self.current_lang, "log_label"))
         self.btn_clear_logs.setText(tr(self.current_lang, "btn_clear_logs"))
         self.search_input.setPlaceholderText(tr(self.current_lang, "help_search_logs"))
+
+        self.btn_mini_browser.setText(tr(lang, "btn_mini_browser"))
+        self.btn_mini_pma.setText(tr(lang, "btn_mini_pma"))
 
         self.log_table.setHorizontalHeaderLabels([
             tr(self.current_lang, "col_log_time"),
@@ -2136,51 +2316,131 @@ class ControlPanel(QWidget):
             conn.close()
         self.load_logs()
 
+    def open_mini_browser(self, path="/"):
+        if not WEBENGINE_AVAILABLE:
+            QMessageBox.warning(
+                self,
+                tr(self.current_lang, "error_title"),
+                "PyQtWebEngine belum terinstall.\n\nJalankan:\n    pip install PyQtWebEngine"
+            )
+            return
+
+        port = get_setting('apache_port', '80')
+        base = "http://localhost" + ("" if port == '80' else f":{port}")
+        url = base + path
+
+        # Reuse dialog jika sudah terbuka
+        dlg = getattr(self, "_mini_browser_dlg", None)
+        if dlg is not None and dlg.isVisible():
+            dlg.navigate(url)
+            dlg.raise_()
+            dlg.activateWindow()
+            return
+
+        self._mini_browser_dlg = MiniBrowserDialog(self, initial_url=url)
+        self._mini_browser_dlg.show()
+
 if __name__ == "__main__":
     try:
-        # Fix agar ikon muncul di taskbar & title bar pada Windows
+        # ============================================================
+        # PyInstaller --onefile FIX for QtWebEngine
+        # MUST run BEFORE QApplication is created.
+        # In --onefile mode, PyInstaller extracts everything to a temp
+        # folder (%TEMP%\_MEIxxxxx) with a random name each run. Without
+        # these env vars, QtWebEngineProcess.exe cannot locate its DLLs
+        # and exits silently -> mini browser shows blank page.
+        # In --onedir mode, these paths simply don't exist, so the
+        # setdefault() calls are harmless no-ops.
+        # ============================================================
+        if getattr(sys, 'frozen', False):
+            _meipass = getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
+
+            # Location of the QtWebEngine helper process
+            _webengine_process = os.path.join(
+                _meipass, "PyQt5", "Qt5", "bin", "QtWebEngineProcess.exe"
+            )
+            if os.path.exists(_webengine_process):
+                os.environ.setdefault("QTWEBENGINEPROCESS_PATH", _webengine_process)
+
+            # Location of resources (.pak files)
+            _resources = os.path.join(_meipass, "PyQt5", "Qt5", "resources")
+            if os.path.isdir(_resources):
+                os.environ.setdefault("QTWEBENGINE_RESOURCES_PATH", _resources)
+
+            # Location of locale files
+            _locales = os.path.join(
+                _meipass, "PyQt5", "Qt5", "translations", "qtwebengine_locales"
+            )
+            if os.path.isdir(_locales):
+                os.environ.setdefault("QTWEBENGINE_LOCALES_PATH", _locales)
+
+            # Chromium sandbox must be disabled inside a temp-extracted dir
+            os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
+
+            # Extra Chromium flags for stability under onefile extraction
+            os.environ.setdefault(
+                "QTWEBENGINE_CHROMIUM_FLAGS",
+                "--no-sandbox --disable-gpu --disable-software-rasterizer"
+            )
+
+            # Ensure Qt's native DLLs are discoverable (Windows only)
+            _qt_bin = os.path.join(_meipass, "PyQt5", "Qt5", "bin")
+            if os.name == 'nt' and os.path.isdir(_qt_bin):
+                try:
+                    os.add_dll_directory(_qt_bin)
+                except (AttributeError, OSError):
+                    pass
+
+        # --- WAJIB untuk QWebEngineView (sebelum QApplication dibuat) ---
+        QApplication.setAttribute(Qt.AA_ShareOpenGLContexts, True)
+        if hasattr(Qt, 'AA_EnableHighDpiScaling'):
+            QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+
+        app = QApplication(sys.argv)
+
+        # --- PENTING: Inisialisasi DB DULU sebelum get_setting dipanggil ---
+        init_db()
+
         if os.name == 'nt':
             myappid = get_setting('appid', 'planetbiruserver')
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 
-        app = QApplication(sys.argv)
-        init_db()
         lang = get_setting('language', 'en')
 
         if os.name == 'nt':
-            # Single instance check menggunakan Mutex
-            # Simpan handle dalam variabel 'instance_mutex' agar tidak terhapus oleh garbage collector
-            instance_mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "Global\\PortableServerControlPanelMutex")
-            if ctypes.windll.kernel32.GetLastError() == 183: # 183 = ERROR_ALREADY_EXISTS
-                QMessageBox.information(None, tr(lang, "app_running_title"), tr(lang, "app_running_msg"))
+            instance_mutex = ctypes.windll.kernel32.CreateMutexW(
+                None, False, "Global\\PortableServerControlPanelMutex")
+            if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+                QMessageBox.information(None, tr(lang, "app_running_title"),
+                                        tr(lang, "app_running_msg"))
                 sys.exit(0)
 
         app.setQuitOnLastWindowClosed(False)
-        # Menjalankan scheduler di thread terpisah
         threading.Thread(target=scheduler_loop, daemon=True).start()
-        
+
         window = ControlPanel()
         if get_setting('auto_start_services', '0') == '1':
             window.start_all_services()
         window.run_startup_tasks()
         if get_setting('start_minimized', '0') == '0':
             window.show()
-            
+
         sys.exit(app.exec_())
+
     except Exception as e:
-        # Jika error terjadi sebelum database siap, gunakan default 'en'
         try:
             lang = get_setting('language', 'en')
-        except:
+        except Exception:
             lang = 'en'
-            
+
         if 'app' not in locals():
             error_app = QApplication(sys.argv)
-            
-        # Jangan tampilkan pesan jika error terkait pembersihan folder temporary PyInstaller
+
         error_str = str(e)
-        if "_MEI" in error_str and ("temporary directory" in error_str or "directory is not empty" in error_str.lower()):
+        if "_MEI" in error_str and ("temporary directory" in error_str
+                                     or "directory is not empty" in error_str.lower()):
             sys.exit(0)
 
-        QMessageBox.critical(None, tr(lang, "fatal_error_title"), f"{tr(lang, 'fatal_error_msg')}\n{str(e)}")
+        QMessageBox.critical(None, tr(lang, "fatal_error_title"),
+                             f"{tr(lang, 'fatal_error_msg')}\n{str(e)}")
         sys.exit(1)

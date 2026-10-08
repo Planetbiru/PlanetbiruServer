@@ -108,7 +108,7 @@ In summary, Planetbiru Server Control Panel stands out for its focus on portabil
     pip install PyQt5 croniter
     ```
 
-3.  **Setup Templates:** Ensure your `config/` folder contains the template files (e.g., `httpd-template.conf`). Use `${INSTALL_DIR}` or `{ROOT}` placeholders in these files for dynamic path replacement.
+3.  **Setup Templates:** Ensure your `config/` folder contains the template files (e.g., `httpd-template.conf`). Use `{INSTALL_DIR}` or `{ROOT}` placeholders in these files for dynamic path replacement.
 
 ## 🖥️ Usage
 
