@@ -99,6 +99,17 @@ A lightweight SQLite file at the root (`config.db`) records each instance's port
 **Dynamic Per-Instance Starter Page:**
 Each instance's `www/index.php` is a **live** page that reads ports from `config.db`, probes Apache/MariaDB/Redis with `fsockopen()`, and displays real-time service status. No static values — always up-to-date.
 
+### Disadvantages
+
+- **Resource Usage:** 
+Running multiple instances on a single machine can consume significant CPU and memory resources.
+
+- **Manual Port Management:** 
+Each instance requires unique port assignments (Apache, MariaDB, Redis). Misconfiguration may lead to conflicts.
+
+- **Limited Scalability:** 
+Suitable for local development or small-scale deployments, but not a replacement for container orchestration or clustered environments.
+
 ---
 
 ## 🚀 Features
