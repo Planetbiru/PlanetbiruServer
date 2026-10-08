@@ -1,4 +1,4 @@
-import sys, os, subprocess, threading, time, sqlite3, configparser, webbrowser, ctypes, socket, hashlib, textwrap
+import sys, os, subprocess, threading, time, sqlite3, configparser, webbrowser, ctypes, socket, hashlib, textwrap, shutil
 from PyQt5.QtCore import QTimer, QEvent, Qt, pyqtSignal, QObject
 from datetime import datetime
 from croniter import croniter
@@ -9,28 +9,89 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QPushButton, QLabel,
 from PyQt5.QtGui import QIcon
 from PyQt5.QtCore import Qt
 
+# ============================================================
+# STEP 1 — TENTUKAN BASE_PATH & BUNDLE_PATH (PALING AWAL)
+# ============================================================
 if getattr(sys, 'frozen', False):
-    # Lokasi folder tempat file .exe berada (untuk DB, INI, dan folder server)
-    BASE_PATH = os.path.dirname(sys.executable)
-    # Path internal bundle khusus untuk resource yang di-embed (seperti icon)
-    BUNDLE_PATH = getattr(sys, '_MEIPASS', BASE_PATH)
+    # Mode .exe: BASE_PATH = folder tempat .exe berada
+    BASE_PATH   = os.path.abspath(os.path.dirname(sys.executable))
+    BUNDLE_PATH = os.path.abspath(getattr(sys, '_MEIPASS', BASE_PATH))
+    _raw_name   = os.path.basename(sys.executable)
 else:
-    BASE_PATH = os.path.dirname(os.path.abspath(__file__))
+    # Mode dev: BASE_PATH = folder tempat file .py berada
+    BASE_PATH   = os.path.abspath(os.path.dirname(os.path.abspath(__file__)))
     BUNDLE_PATH = BASE_PATH
+    _raw_name   = os.path.basename(os.path.abspath(__file__))
 
-DB_PATH = os.path.join(BASE_PATH, "setting.db")
+# ============================================================
+# STEP 2 — APP_NAME (dari nama .exe / .py, bisa di-override)
+# ============================================================
+APP_NAME = os.environ.get("APP_NAME") or os.path.splitext(_raw_name)[0]
+APP_NAME = "".join(c for c in APP_NAME if c.isalnum() or c in "-_.")
+if not APP_NAME:
+    APP_NAME = "PlanetbiruServer"
 
-# Gunakan localization.ini dari folder EXE jika ada (user override), 
-# jika tidak ada gunakan yang di dalam bundle.
-INI_PATH = os.path.join(BASE_PATH, "localization.ini")
+# ============================================================
+# STEP 3 — FORWARD-SLASH VARIANTS (untuk isi config Apache/MariaDB/Redis)
+# ============================================================
+BASE_PATH_FWD   = BASE_PATH.replace("\\", "/")
+BUNDLE_PATH_FWD = BUNDLE_PATH.replace("\\", "/")
+
+# ============================================================
+# STEP 4 — CONFIG PATHS (final config per-instance)
+# ============================================================
+DB_PATH         = os.path.abspath(os.path.join(BASE_PATH, f"{APP_NAME}.db"))
+CONFIG_DB_PATH  = os.path.abspath(os.path.join(BASE_PATH, "config.db"))
+CONFIG_DIR      = os.path.abspath(os.path.join(BASE_PATH, "config"))
+
+APACHE_CONF_PATH = os.path.abspath(os.path.join(CONFIG_DIR, f"{APP_NAME}-httpd.conf"))
+MYSQL_CONF_PATH  = os.path.abspath(os.path.join(CONFIG_DIR, f"{APP_NAME}-my.ini"))
+REDIS_CONF_PATH  = os.path.abspath(os.path.join(CONFIG_DIR, f"{APP_NAME}-redis.conf"))
+
+# ============================================================
+# STEP 5 — INSTANCE-SPECIFIC PATHS (di bawah instances/{APP_NAME}/)
+# ============================================================
+INSTANCE_ROOT         = os.path.abspath(os.path.join(BASE_PATH, "instances", APP_NAME))
+INSTANCE_WWW_DIR      = os.path.abspath(os.path.join(INSTANCE_ROOT, "www"))
+INSTANCE_DATA_DIR     = os.path.abspath(os.path.join(INSTANCE_ROOT, "data"))       # ✅ pakai INSTANCE_ROOT
+INSTANCE_MYSQL_DATA   = os.path.abspath(os.path.join(INSTANCE_DATA_DIR, "mysql"))
+INSTANCE_REDIS_DATA   = os.path.abspath(os.path.join(INSTANCE_DATA_DIR, "redis"))
+INSTANCE_LOGS_DIR     = os.path.abspath(os.path.join(INSTANCE_ROOT, "logs"))
+INSTANCE_TMP_DIR      = os.path.abspath(os.path.join(INSTANCE_ROOT, "tmp"))
+INSTANCE_SESSIONS_DIR = os.path.abspath(os.path.join(INSTANCE_ROOT, "sessions"))
+
+# php.ini per-instance (nama standar "php.ini" agar PHP bisa menemukannya)
+PHP_INI_PATH          = os.path.abspath(os.path.join(INSTANCE_ROOT, "php.ini"))
+
+# Shared phpMyAdmin (dipakai semua instance via Alias)
+PHPMYADMIN_DIR        = os.path.abspath(os.path.join(BASE_PATH, "phpMyAdmin"))
+
+# ============================================================
+# STEP 6 — CANONICAL TEMPLATE NAMES (Tier 1)
+# ============================================================   
+
+TEMPLATE_HTTPD = "httpd-template.conf"
+TEMPLATE_PHP   = "php-template.ini"
+TEMPLATE_MYSQL = "my-template.ini"
+TEMPLATE_REDIS = "redis.windows-service-template.conf"
+
+# ============================================================
+# STEP 7 — BINARY PATHS (SHARED, ABSOLUT)
+# ============================================================
+APACHE_PATH = os.path.abspath(os.path.join(BASE_PATH, "apache", "bin", "httpd.exe"))
+MYSQL_PATH  = os.path.abspath(os.path.join(BASE_PATH, "mysql", "bin", "mysqld.exe"))
+REDIS_PATH  = os.path.abspath(os.path.join(BASE_PATH, "redis", "redis-server.exe"))
+PHP_PATH    = os.path.abspath(os.path.join(BASE_PATH, "php", "php.exe"))
+PHP_DIR     = os.path.abspath(os.path.join(BASE_PATH, "php"))
+
+# ============================================================
+# STEP 8 — LOCALIZATION (SHARED)
+# ============================================================
+INI_PATH = os.path.abspath(os.path.join(BASE_PATH, "localization.ini"))
 if not os.path.exists(INI_PATH):
-    INI_PATH = os.path.join(BUNDLE_PATH, "localization.ini")
+    INI_PATH = os.path.abspath(os.path.join(BUNDLE_PATH, "localization.ini"))
 
-APACHE_PATH = os.path.join(BASE_PATH, "apache", "bin", "httpd.exe")
-MYSQL_PATH = os.path.join(BASE_PATH, "mysql", "bin", "mysqld.exe")
-REDIS_PATH = os.path.join(BASE_PATH, "redis", "redis-server.exe")
-
-db_lock = threading.RLock() # Re-entrant lock untuk mencegah deadlock pada nested calls
+db_lock = threading.RLock()  # Re-entrant lock untuk mencegah deadlock pada nested calls
 
 class LogSignal(QObject):
     updated = pyqtSignal()
@@ -41,20 +102,76 @@ log_signal = LogSignal()
 config = configparser.ConfigParser()
 config.read(INI_PATH, encoding='utf-8')
 
+# ============================================================
+# INSTANCE TEMPLATE MANAGEMENT
+# ============================================================
+def _instance_template_name(template_name):
+    """Ubah nama canonical menjadi nama per-instance.
+    Contoh: 'httpd-template.conf' → 'PlanetbiruServer-httpd-template.conf'
+    """
+    return f"{APP_NAME}-{template_name}"
+
+def _ensure_instance_template(template_name):
+    """Sinkronkan template per-instance dengan canonical (Tier 1).
+
+    Tier 2 = SALINAN Tier 1, tidak boleh ada nilai hardcoded.
+    Setiap kali dipanggil, Tier 2 selalu ditimpa dari Tier 1 agar
+    placeholder terbaru (mis. {REDIS_PORT}) selalu aktif.
+
+    Jangan edit Tier 2 secara manual — edit Tier 1 (canonical).
+    """
+    instance_name = _instance_instance_name = _instance_template_name(template_name)
+    instance_path = os.path.join(CONFIG_DIR, instance_name)
+
+    # Cari sumber canonical
+    canonical_src = None
+    for src in [
+        os.path.join(BASE_PATH, "config", template_name),
+        os.path.join(BUNDLE_PATH, "config", template_name),
+    ]:
+        if os.path.exists(src):
+            canonical_src = src
+            break
+
+    if not canonical_src:
+        add_log(f"Source template not found: {template_name}", "WARNING")
+        return None
+
+    try:
+        # Cek apakah isi berbeda dari canonical
+        need_copy = True
+        if os.path.exists(instance_path):
+            try:
+                with open(instance_path, "rb") as f1, open(canonical_src, "rb") as f2:
+                    if f1.read() == f2.read():
+                        need_copy = False
+            except Exception:
+                need_copy = True
+
+        if need_copy:
+            os.makedirs(os.path.dirname(instance_path), exist_ok=True)
+            shutil.copy2(canonical_src, instance_path)
+            if os.path.exists(instance_path):
+                add_log(f"Synced instance template: {instance_name}")
+            else:
+                add_log(f"Created instance template: {instance_name}")
+
+        return instance_path
+    except Exception as e:
+        add_log(f"Failed to sync instance template {instance_name}: {e}", "ERROR")
+        return None
+
 def is_pid_running(pid):
     """Memeriksa apakah PID masih aktif di Windows."""
     if pid <= 0: return False
-    import ctypes
     SYNCHRONIZE = 0x00100000
     PROCESS_QUERY_INFORMATION = 0x0400
-    # Membuka proses untuk memeriksa status
     handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_INFORMATION | SYNCHRONIZE, False, pid)
     if handle:
         exit_code = ctypes.c_ulong()
         ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code))
         ctypes.windll.kernel32.CloseHandle(handle)
-        # 259 adalah STILL_ACTIVE
-        return exit_code.value == 259
+        return exit_code.value == 259  # STILL_ACTIVE
     return False
 
 def is_port_in_use(port):
@@ -63,31 +180,90 @@ def is_port_in_use(port):
         return s.connect_ex(('127.0.0.1', port)) == 0
 
 def replace_and_write(template_name, target_path):
-    # Cek di folder eksternal (BASE_PATH) terlebih dahulu untuk kustomisasi user
-    template_path = os.path.join(BASE_PATH, "config", template_name)
-    
-    if not os.path.exists(template_path):
-        # Jika tidak ada, baru cari di dalam bundle internal (BUNDLE_PATH)
-        template_path = os.path.join(BUNDLE_PATH, "config", template_name)
-    
-    if not os.path.exists(template_path):
-        add_log(f"Template not found: {template_path}", "WARNING")
+    """Generate file konfigurasi dari template per-instance.
+    Mendukung placeholder: {INSTALL_DIR}, ${INSTALL_DIR}, {ROOT}, dst."""
+    template_path = _ensure_instance_template(template_name)
+    if not template_path:
         return
-    
+
     try:
         with open(template_path, "r", encoding='utf-8') as f:
             content = f.read()
-        
-        # Replace ${INSTALL_DIR} dengan BASE_PATH (menggunakan forward slash untuk config)
+
+        # Path absolut forward-slash (untuk isi config)
+        clean_base   = BASE_PATH.replace("\\", "/")
+        mysql_home   = (clean_base + "/mysql")
+        instance_data = clean_base + "/instances/" + APP_NAME
+        instance_logs = instance_data + "/logs"
+        instance_tmp  = instance_data + "/tmp"
+        instance_sess = instance_data + "/sessions"
+        instance_mysql_data = instance_data + "/data/mysql"
+        instance_redis_data = instance_data + "/data/redis"
+
+        # ============================================================
+        # Placeholder standar — PERHATIKAN: ganti KEDUA bentuk
+        # ({INSTALL_DIR} DAN ${INSTALL_DIR}) agar template apa pun cocok.
+        # ============================================================
+        for placeholder in ("{INSTALL_DIR}", "${INSTALL_DIR}", "{ROOT}"):
+            content = content.replace(placeholder, clean_base)
+
+                # Path absolut forward-slash
         clean_base = BASE_PATH.replace("\\", "/")
-        content = content.replace("{ROOT}", clean_base)
-        content = content.replace("${INSTALL_DIR}", clean_base)
-        content = content.replace("{APACHE_PORT}", get_setting('apache_port', '80'))
-        content = content.replace("{MYSQL_PORT}", get_setting('mysql_port', '3306'))
-        content = content.replace("{REDIS_PORT}", get_setting('redis_port', '6379'))
-        # Tambahkan placeholder khusus untuk MariaDB basedir
-        content = content.replace("{MYSQL_HOME}", (clean_base + "/mysql").replace("//", "/"))
-        
+
+        instance_root_fwd = INSTANCE_ROOT.replace("\\", "/")
+        instance_www_fwd  = INSTANCE_WWW_DIR.replace("\\", "/")
+        instance_logs_fwd = INSTANCE_LOGS_DIR.replace("\\", "/")
+        instance_tmp_fwd  = INSTANCE_TMP_DIR.replace("\\", "/")
+        instance_sess_fwd = INSTANCE_SESSIONS_DIR.replace("\\", "/")
+        instance_data_fwd = INSTANCE_DATA_DIR.replace("\\", "/")
+        instance_mysql_data_fwd = INSTANCE_MYSQL_DATA.replace("\\", "/")
+        instance_redis_data_fwd = INSTANCE_REDIS_DATA.replace("\\", "/")
+        config_dir_fwd    = CONFIG_DIR.replace("\\", "/")
+        phpmyadmin_fwd    = PHPMYADMIN_DIR.replace("\\", "/")
+        php_ini_fwd       = PHP_INI_PATH.replace("\\", "/")
+
+        # Placeholder standar (dua bentuk: {X} dan ${X})
+        for placeholder in ("{INSTALL_DIR}", "${INSTALL_DIR}", "{ROOT}"):
+            content = content.replace(placeholder, clean_base)
+
+        content = content.replace("{APP_NAME}",          APP_NAME)
+        content = content.replace("{MYSQL_HOME}",        os.path.join(BASE_PATH, "mysql").replace("\\", "/"))
+        content = content.replace("{CONFIG_DIR}",        config_dir_fwd)
+        content = content.replace("{PHP_INI}",           php_ini_fwd)
+        content = content.replace("{PHPMYADMIN_DIR}",    phpmyadmin_fwd)
+        content = content.replace("{APACHE_PORT}",       get_setting('apache_port', '80'))
+        content = content.replace("{MYSQL_PORT}",        get_setting('mysql_port', '3306'))
+        content = content.replace("{REDIS_PORT}",        get_setting('redis_port', '6379'))
+
+        # Placeholder per-instance
+        content = content.replace("{INSTANCE_ROOT}",     instance_root_fwd)
+        content = content.replace("{INSTANCE_WWW}",      instance_www_fwd)
+        content = content.replace("{INSTANCE_LOGS}",     instance_logs_fwd)
+        content = content.replace("{INSTANCE_TMP}",      instance_tmp_fwd)
+        content = content.replace("{INSTANCE_SESSIONS}", instance_sess_fwd)
+        content = content.replace("{INSTANCE_DATA}",     instance_data_fwd)
+        content = content.replace("{INSTANCE_MYSQL_DATA}", instance_mysql_data_fwd)
+        content = content.replace("{INSTANCE_REDIS_DATA}", instance_redis_data_fwd)
+
+        # ============================================================
+        # Backward-compat: template lama yang pakai {ROOT}/data/... dsb.
+        # ============================================================
+        content = content.replace(f"{clean_base}/data/mysql", instance_mysql_data_fwd)
+        content = content.replace(f"{clean_base}/data/redis", instance_redis_data_fwd)
+        content = content.replace(f"{clean_base}/logs/php_error.log", instance_logs_fwd + "/php_error.log")
+        content = content.replace(f"{clean_base}/logs/mariadb.log",   instance_logs_fwd + "/mariadb.log")
+        content = content.replace(f"{clean_base}/logs/slow.log",      instance_logs_fwd + "/slow.log")
+        content = content.replace(f"{clean_base}/logs/redis.log",     instance_logs_fwd + "/redis.log")
+        content = content.replace(f"{clean_base}/tmp",                instance_tmp_fwd)
+        content = content.replace(f"{clean_base}/sessions",           instance_sess_fwd)
+
+        # ------------------------------------------------------------
+        # FIX khusus MariaDB: basedir harus menunjuk ke folder /mysql
+        # ------------------------------------------------------------
+        if "my-template" in template_name.lower() or "my.ini" in target_path.lower():
+            content = content.replace(f"basedir={clean_base}\n",  f"basedir={clean_base}/mysql\n")
+            content = content.replace(f"basedir={clean_base}/",   f"basedir={clean_base}/mysql/")
+
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
         with open(target_path, "w", encoding='utf-8') as f:
             f.write(content)
@@ -95,31 +271,546 @@ def replace_and_write(template_name, target_path):
     except Exception as e:
         add_log(f"Error generating config {template_name}: {str(e)}", "ERROR")
 
-def prepare_environment():
-    add_log("Preparing environment directories and configs...")
-    # Create Directories
-    dirs = ["www", "tmp", "data", "data/mysql", "data/redis", "logs", "sessions", "apache/logs"]
-    for d in dirs:
-        os.makedirs(os.path.join(BASE_PATH, d), exist_ok=True)
-    
-    # Generate Configs from Templates
-    replace_and_write("httpd-template.conf", os.path.join(BASE_PATH, "config", "httpd.conf"))
-    replace_and_write("php-template.ini", os.path.join(BASE_PATH, "php", "php.ini"))
-    replace_and_write("my-template.ini", os.path.join(BASE_PATH, "config", "my.ini"))
-    replace_and_write("redis.windows-service-template.conf", os.path.join(BASE_PATH, "redis", "redis.windows.conf"))
+def _ensure_dir(path, label=None):
+    """Buat folder jika belum ada. Return True jika baru dibuat, False jika sudah ada.
+    Log hanya saat folder baru dibuat atau saat error.
+    """
+    if os.path.isdir(path):
+        return False
+    try:
+        os.makedirs(path, exist_ok=True)
+        if label:
+            add_log(f"Created directory: {label}")
+        else:
+            add_log(f"Created directory: {os.path.basename(path)}")
+        return True
+    except Exception as e:
+        add_log(f"Failed to create directory {path}: {e}", "ERROR")
+        return False
 
-    # Update PATH for PHP
+def prepare_environment():
+    """Siapkan seluruh folder & file config yang dibutuhkan instance ini."""
+    add_log(f"Preparing environment for instance: {APP_NAME}")
+
+    # ============================================================
+    # 1. Folder SHARED (dipakai semua instance)
+    # ============================================================
+    shared_dirs = [
+        ("config",       "config/"),
+        ("php",          "php/"),
+        ("redis",        "redis/"),
+        ("apache",       "apache/"),
+        ("apache/logs",  "apache/logs/"),
+        ("mysql",        "mysql/"),
+        ("phpMyAdmin",   "phpMyAdmin/"),     # ← shared phpMyAdmin
+    ]
+    for rel, label in shared_dirs:
+        _ensure_dir(os.path.join(BASE_PATH, rel), label)
+
+    # ============================================================
+    # 2. Folder ROOT instances/
+    # ============================================================
+    _ensure_dir(os.path.join(BASE_PATH, "instances"), "instances/")
+
+    # ============================================================
+    # 3. Folder PER-INSTANCE di bawah instances/{APP_NAME}/
+    # ============================================================
+    instance_dirs = [
+        (INSTANCE_ROOT,           f"instances/{APP_NAME}/"),
+        (INSTANCE_WWW_DIR,        f"instances/{APP_NAME}/www/"),         # ← per-instance www
+        (INSTANCE_DATA_DIR,       f"instances/{APP_NAME}/data/"),
+        (INSTANCE_MYSQL_DATA,     f"instances/{APP_NAME}/data/mysql/"),
+        (INSTANCE_REDIS_DATA,     f"instances/{APP_NAME}/data/redis/"),
+        (INSTANCE_LOGS_DIR,       f"instances/{APP_NAME}/logs/"),
+        (INSTANCE_TMP_DIR,        f"instances/{APP_NAME}/tmp/"),
+        (INSTANCE_SESSIONS_DIR,   f"instances/{APP_NAME}/sessions/"),
+    ]
+    for path, label in instance_dirs:
+        _ensure_dir(path, label)
+
+    # ============================================================
+    # 3b. Seed index.php di folder www instance (jika masih kosong)
+    # ============================================================
+    _seed_instance_www()
+
+    # ============================================================
+    # 4. Generate file config dari template per-instance
+    # ============================================================
+    config_targets = [
+        (TEMPLATE_HTTPD, APACHE_CONF_PATH),
+        (TEMPLATE_PHP,   PHP_INI_PATH),
+        (TEMPLATE_MYSQL, MYSQL_CONF_PATH),
+        (TEMPLATE_REDIS, REDIS_CONF_PATH),
+    ]
+    for template_name, target_path in config_targets:
+        if not os.path.exists(target_path):
+            replace_and_write(template_name, target_path)
+
+    # ============================================================
+    # 5. Update PATH untuk PHP
+    # ============================================================
     php_path = os.path.join(BASE_PATH, "php")
-    php_ext = os.path.join(BASE_PATH, "php", "ext")
+    php_ext  = os.path.join(BASE_PATH, "php", "ext")
     env_path = os.environ.get("PATH", "")
     if php_path not in env_path:
         os.environ["PATH"] = f"{php_path}{os.pathsep}{php_ext}{os.pathsep}{env_path}"
+
+    # ============================================================
+    # 6. Set PHPRC agar PHP membaca php.ini instance ini
+    # ============================================================
+    if os.path.exists(PHP_INI_PATH):
+        os.environ["PHPRC"] = os.path.dirname(os.path.abspath(PHP_INI_PATH))
+        os.environ["PHPRC_INI_FILE"] = os.path.abspath(PHP_INI_PATH)
+        add_log(f"PHP ini: {PHP_INI_PATH}")
+
+    add_log("Environment ready.")
+
+def _seed_instance_www():
+    """Create dynamic starter index.php in the instance's www folder if missing."""
+    if not os.path.isdir(INSTANCE_WWW_DIR):
+        return
+
+    index_path = os.path.join(INSTANCE_WWW_DIR, "index.php")
+    if not os.path.exists(index_path):
+        try:
+            php_code = r'''<?php
+declare(strict_types=1);
+
+/* ============================================================
+ * Resolve current instance
+ * Apache injects APP_NAME via `SetEnv APP_NAME {APP_NAME}`.
+ * Fall back to runtime values if env var is missing.
+ * ============================================================ */
+$app_name    = getenv('APP_NAME') ?: 'unknown';
+$apache_port = (int) (getenv('APACHE_PORT') ?: ($_SERVER['SERVER_PORT'] ?? 80));
+$mysql_port  = (int) (getenv('MYSQL_PORT')  ?: 3306);
+$redis_port  = (int) (getenv('REDIS_PORT')  ?: 6379);
+$app_id      = '';
+
+/* ============================================================
+ * Read shared config.db (optional, richer info)
+ * Path: <BASE_PATH>/config.db  →  ../../../config.db from this file
+ * ============================================================ */
+$config_db = dirname(__DIR__, 3) . DIRECTORY_SEPARATOR . 'config.db';
+
+if ($app_name !== 'unknown' && is_file($config_db) && class_exists('SQLite3')) {
+    try {
+        $db = new SQLite3($config_db, SQLITE3_OPEN_READONLY);
+        $db->busyTimeout(500);
+
+        $stmt = $db->prepare(
+            'SELECT apache_port, mariadb_port, redis_port, application_id '
+          . 'FROM instance_config WHERE instance_name = :n LIMIT 1'
+        );
+        $stmt->bindValue(':n', $app_name, SQLITE3_TEXT);
+
+        $res = $stmt->execute();
+        if ($res) {
+            $row = $res->fetchArray(SQLITE3_ASSOC);
+            if ($row) {
+                if (!empty($row['apache_port']))    $apache_port = (int) $row['apache_port'];
+                if (!empty($row['mariadb_port']))   $mysql_port  = (int) $row['mariadb_port'];
+                if (!empty($row['redis_port']))     $redis_port  = (int) $row['redis_port'];
+                if (!empty($row['application_id'])) $app_id      = (string) $row['application_id'];
+            }
+            $res->finalize();
+        }
+        $db->close();
+    } catch (Throwable $e) {
+        /* Silently fall back to env-derived values */
+    }
+}
+
+/* ============================================================
+ * Check if a TCP port is listening on 127.0.0.1
+ * ============================================================ */
+function tcp_open(string $host, int $port, float $timeout = 0.25): bool {
+    $fp = @fsockopen($host, $port, $errno, $errstr, $timeout);
+    if ($fp) { fclose($fp); return true; }
+    return false;
+}
+
+$services = [
+    ['key' => 'apache',  'label' => 'Apache',  'port' => $apache_port, 'up' => false],
+    ['key' => 'mariadb', 'label' => 'MariaDB', 'port' => $mysql_port,  'up' => false],
+    ['key' => 'redis',   'label' => 'Redis',   'port' => $redis_port,  'up' => false],
+];
+
+foreach ($services as $i => $svc) {
+    if ($svc['port'] > 0) {
+        $services[$i]['up'] = tcp_open('127.0.0.1', (int) $svc['port']);
+    }
+}
+
+$all_up = true;
+foreach ($services as $svc) {
+    if (!$svc['up']) { $all_up = false; break; }
+}
+
+/* HTML escaping shortcut */
+function h($v): string {
+    return htmlspecialchars((string) $v, ENT_QUOTES, 'UTF-8');
+}
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex, nofollow">
+<title>Planetbiru Server &mdash; <?php echo h($app_name); ?></title>
+<style>
+    :root {
+        --bg-start:  #f8fafc;
+        --bg-end:    #e2e8f0;
+        --card-bg:   #ffffff;
+        --text:      #0f172a;
+        --text-soft: #475569;
+        --text-mute: #94a3b8;
+        --accent:    #4f46e5;
+        --accent-2:  #7c3aed;
+        --accent-bg: #eef2ff;
+        --border:    #e2e8f0;
+        --success:   #10b981;
+        --danger:    #ef4444;
+        --shadow:    0 4px 6px -1px rgba(0,0,0,.05), 0 2px 4px -2px rgba(0,0,0,.05);
+        --shadow-lg: 0 10px 15px -3px rgba(0,0,0,.08), 0 4px 6px -4px rgba(0,0,0,.08);
+    }
+
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+
+    body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                     "Helvetica Neue", Arial, sans-serif;
+        background: linear-gradient(160deg, var(--bg-start) 0%, var(--bg-end) 100%);
+        color: var(--text);
+        line-height: 1.6;
+        min-height: 100vh;
+        padding: 2.5rem 1rem;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+    }
+
+    .container { max-width: 880px; margin: 0 auto; }
+
+    /* ---------- HERO ---------- */
+    .hero { text-align: center; margin-bottom: 2.75rem; }
+
+    .hero-icon {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 68px; height: 68px; border-radius: 22px;
+        background: linear-gradient(135deg, var(--accent), var(--accent-2));
+        color: #fff; font-size: 34px; line-height: 1;
+        margin-bottom: 1.125rem;
+        box-shadow: 0 10px 24px -8px rgba(79,70,229,.55);
+    }
+
+    .hero h1 {
+        font-size: 1.875rem; font-weight: 700;
+        letter-spacing: -0.025em; margin: 0 0 .375rem;
+    }
+
+    .hero .subtitle { color: var(--text-soft); font-size: 1rem; margin: 0; }
+
+    .hero .subtitle code {
+        background: var(--accent-bg); color: var(--accent);
+        padding: .15rem .55rem; border-radius: 6px;
+        font-weight: 600; font-size: .875rem;
+        font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    }
+
+    /* ---------- SECTIONS ---------- */
+    section { margin-bottom: 2rem; }
+
+    section > h2 {
+        font-size: .72rem; font-weight: 700;
+        text-transform: uppercase; letter-spacing: .12em;
+        color: var(--text-mute);
+        margin: 0 0 .75rem .25rem;
+    }
+
+    /* ---------- STATUS GRID ---------- */
+    .status-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        gap: .75rem;
+    }
+
+    .status-card {
+        background: var(--card-bg);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 1rem 1.125rem;
+        box-shadow: var(--shadow);
+        display: flex; flex-direction: column; gap: .25rem;
+    }
+
+    .status-card .label {
+        font-size: .7rem; text-transform: uppercase;
+        letter-spacing: .08em; color: var(--text-mute); font-weight: 600;
+    }
+
+    .status-card .value {
+        font-size: 1.125rem; font-weight: 700; color: var(--text);
+        font-variant-numeric: tabular-nums;
+        display: flex; align-items: center; flex-wrap: wrap;
+    }
+
+    .status-card .value small {
+        display: block; width: 100%;
+        font-size: .72rem; font-weight: 500;
+        color: var(--text-mute); margin-top: .15rem;
+    }
+
+    .status-card .value.online::before,
+    .status-card .value.offline::before {
+        content: ""; display: inline-block;
+        width: 8px; height: 8px; border-radius: 50%;
+        margin-right: .5rem; vertical-align: middle;
+    }
+    .status-card .value.online::before {
+        background: var(--success);
+        box-shadow: 0 0 0 3px rgba(16,185,129,.15);
+    }
+    .status-card .value.offline::before {
+        background: var(--danger);
+        box-shadow: 0 0 0 3px rgba(239,68,68,.15);
+    }
+    .status-card .value.offline { color: var(--danger); }
+
+    /* ---------- BANNER ---------- */
+    .banner {
+        padding: 1rem 1.25rem;
+        border-radius: 12px;
+        font-size: .9375rem;
+        font-weight: 500;
+        border: 1px solid transparent;
+        box-shadow: var(--shadow);
+    }
+    .banner-success {
+        background: #ecfdf5; color: #065f46; border-color: #a7f3d0;
+    }
+    .banner-warn {
+        background: #fffbeb; color: #92400e; border-color: #fde68a;
+    }
+
+    /* ---------- ACTION GRID ---------- */
+    .action-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+        gap: .75rem;
+    }
+
+    .action-card {
+        display: flex; align-items: center; gap: .9rem;
+        padding: 1rem 1.125rem;
+        background: var(--card-bg);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        box-shadow: var(--shadow);
+        text-decoration: none; color: inherit;
+        transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease;
+    }
+
+    .action-card:hover {
+        transform: translateY(-2px);
+        box-shadow: var(--shadow-lg);
+        border-color: var(--accent);
+    }
+
+    .action-card .icon {
+        flex-shrink: 0;
+        width: 42px; height: 42px;
+        display: flex; align-items: center; justify-content: center;
+        border-radius: 10px;
+        background: var(--accent-bg); color: var(--accent);
+        font-size: 22px; line-height: 1;
+    }
+
+    .action-card .text { display: flex; flex-direction: column; line-height: 1.35; }
+    .action-card .text strong { font-size: .9375rem; font-weight: 600; }
+    .action-card .text span   { font-size: .8125rem; color: var(--text-soft); }
+
+    /* ---------- INFO CARD ---------- */
+    .info-card {
+        background: var(--card-bg);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 1.25rem 1.375rem;
+        box-shadow: var(--shadow);
+    }
+
+    .info-card dl {
+        display: grid;
+        grid-template-columns: max-content 1fr;
+        gap: .6rem 1.5rem;
+        margin: 0;
+        font-size: .875rem;
+    }
+
+    .info-card dt { color: var(--text-mute); font-weight: 500; white-space: nowrap; }
+    .info-card dd { margin: 0; word-break: break-all; }
+
+    .info-card code,
+    footer code {
+        background: #f1f5f9; color: #0f172a;
+        padding: .12rem .4rem; border-radius: 4px;
+        font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+        font-size: .8125rem;
+    }
+
+    /* ---------- FOOTER ---------- */
+    footer {
+        text-align: center;
+        margin-top: 3rem; padding-top: 1.5rem;
+        border-top: 1px solid var(--border);
+        color: var(--text-mute);
+        font-size: .8125rem;
+    }
+
+    /* ---------- RESPONSIVE ---------- */
+    @media (max-width: 480px) {
+        body { padding: 1.5rem .875rem; }
+        .hero h1 { font-size: 1.5rem; }
+        .hero-icon { width: 56px; height: 56px; font-size: 28px; border-radius: 18px; }
+        .info-card dl { grid-template-columns: 1fr; gap: .25rem; }
+        .info-card dt { margin-top: .5rem; }
+    }
+</style>
+</head>
+<body>
+<div class="container">
+
+    <header class="hero">
+        <div class="hero-icon" aria-hidden="true">&#128752;</div>
+        <h1>Planetbiru Server</h1>
+        <p class="subtitle">Instance <code><?php echo h($app_name); ?></code></p>
+    </header>
+
+    <main>
+
+        <section>
+            <h2>Environment</h2>
+            <div class="status-grid">
+                <div class="status-card">
+                    <span class="label">PHP Version</span>
+                    <span class="value online"><?php echo h(PHP_VERSION); ?></span>
+                </div>
+                <div class="status-card">
+                    <span class="label">Server Time</span>
+                    <span class="value"><?php echo h(date('H:i:s')); ?></span>
+                </div>
+                <div class="status-card">
+                    <span class="label">Server Date</span>
+                    <span class="value"><?php echo h(date('Y-m-d')); ?></span>
+                </div>
+                <div class="status-card">
+                    <span class="label">Platform</span>
+                    <span class="value" style="font-size:.875rem"><?php echo h(PHP_OS); ?></span>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <h2>Services</h2>
+            <div class="status-grid">
+                <?php foreach ($services as $svc): ?>
+                    <div class="status-card">
+                        <span class="label"><?php echo h($svc['label']); ?></span>
+                        <span class="value <?php echo $svc['up'] ? 'online' : 'offline'; ?>">
+                            <?php echo $svc['up'] ? 'Running' : 'Stopped'; ?>
+                            <small>port <?php echo h($svc['port']); ?></small>
+                        </span>
+                    </div>
+                <?php endforeach; ?>
+            </div>
+        </section>
+
+        <section>
+            <?php if ($all_up): ?>
+                <div class="banner banner-success">
+                    &#10003; All services are up and running.
+                </div>
+            <?php else: ?>
+                <div class="banner banner-warn">
+                    &#9888; Some services are not running. Start them from the control panel.
+                </div>
+            <?php endif; ?>
+        </section>
+
+        <section>
+            <h2>Quick Actions</h2>
+            <div class="action-grid">
+                <a href="/phpMyAdmin/" class="action-card">
+                    <div class="icon" aria-hidden="true">&#128451;</div>
+                    <div class="text">
+                        <strong>phpMyAdmin</strong>
+                        <span>Manage MariaDB databases</span>
+                    </div>
+                </a>
+            </div>
+        </section>
+
+        <section>
+            <h2>Instance Information</h2>
+            <div class="info-card">
+                <dl>
+                    <dt>Instance ID</dt>
+                    <dd><code><?php echo h($app_id !== '' ? $app_id : '&mdash;'); ?></code></dd>
+
+                    <dt>Document Root</dt>
+                    <dd><code>instances/<?php echo h($app_name); ?>/www/</code></dd>
+
+                    <dt>Apache Config</dt>
+                    <dd><code>config/<?php echo h($app_name); ?>-httpd.conf</code></dd>
+
+                    <dt>MariaDB Config</dt>
+                    <dd><code>config/<?php echo h($app_name); ?>-my.ini</code></dd>
+
+                    <dt>Redis Config</dt>
+                    <dd><code>config/<?php echo h($app_name); ?>-redis.conf</code></dd>
+
+                    <dt>Log Directory</dt>
+                    <dd><code>instances/<?php echo h($app_name); ?>/logs/</code></dd>
+
+                    <dt>Session Directory</dt>
+                    <dd><code>instances/<?php echo h($app_name); ?>/sessions/</code></dd>
+                </dl>
+            </div>
+        </section>
+
+    </main>
+
+    <footer>
+        <p>Place your application files in <code>instances/<?php echo h($app_name); ?>/www/</code></p>
+    </footer>
+
+</div>
+</body>
+</html>
+'''
+
+            with open(index_path, "w", encoding="utf-8") as f:
+                f.write(php_code)
+            add_log(f"Created dynamic index.php in {APP_NAME}/www/")
+        except Exception as e:
+            add_log(f"Failed to seed index.php: {e}", "WARNING")
+
+    # .htaccess — keep as-is
+    htaccess_path = os.path.join(INSTANCE_WWW_DIR, ".htaccess")
+    if not os.path.exists(htaccess_path):
+        try:
+            with open(htaccess_path, "w", encoding="utf-8") as f:
+                f.write("# Instance: " + APP_NAME + "\nOptions -Indexes\n")
+        except Exception:
+            pass
 
 def set_run_on_startup(enabled):
     if os.name != 'nt': return
     import winreg
     key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
-    app_name = "PortableServerPanel"
+    app_name = f"PortableServerPanel_{APP_NAME}"     # per-instance registry key
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
         if enabled:
@@ -199,6 +890,9 @@ def init_db():
     set_mysql_access(get_setting('mysql_access_mode', 'local') == 'external', force=True)
     set_redis_access(get_setting('redis_access_mode', 'local') == 'external', force=True)
 
+    init_shared_config()
+    register_instance_config()
+
 def add_log(message, level="INFO"):
     with db_lock:
         conn = sqlite3.connect(DB_PATH)
@@ -226,18 +920,74 @@ def set_setting(key, value):
         conn.commit()
         conn.close()
 
+# ============================================================
+# SHARED CONFIG.DB — info semua instance (dibaca phpMyAdmin, dll.)
+# ============================================================
+def init_shared_config():
+    """Buat tabel instance_config jika belum ada.
+    Tabel ini di-share oleh semua instance (satu file, satu skema)."""
+    try:
+        conn = sqlite3.connect(CONFIG_DB_PATH)
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS instance_config (
+                instance_name  TEXT PRIMARY KEY,
+                apache_port    INTEGER,
+                mariadb_port   INTEGER,
+                redis_port     INTEGER,
+                application_id TEXT,
+                updated_at     TEXT
+            )
+        """)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        add_log(f"Failed to init shared config.db: {e}", "ERROR")
+
+def register_instance_config():
+    """Daftarkan / update baris instance ini di config.db.
+    Dipanggil saat startup dan setiap kali setting port berubah."""
+    try:
+        conn = sqlite3.connect(CONFIG_DB_PATH)
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT OR REPLACE INTO instance_config
+                (instance_name, apache_port, mariadb_port, redis_port, application_id, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            APP_NAME,
+            int(get_setting('apache_port', '80')),
+            int(get_setting('mysql_port', '3306')),
+            int(get_setting('redis_port', '6379')),
+            get_setting('app_id', 'planetbiruserver'),
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        ))
+        conn.commit()
+        conn.close()
+        add_log(f"Registered instance in config.db: {APP_NAME}")
+    except Exception as e:
+        add_log(f"Failed to register instance config: {e}", "ERROR")
+
+def unregister_instance_config():
+    """Hapus baris instance ini dari config.db (dipanggil saat uninstall)."""
+    try:
+        conn = sqlite3.connect(CONFIG_DB_PATH)
+        cur = conn.cursor()
+        cur.execute("DELETE FROM instance_config WHERE instance_name=?", (APP_NAME,))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
 # --- Scheduler thread ---
 def scheduler_loop():
     while True:
-        # Sinkronisasi: Tunggu hingga detik 00 pada menit berikutnya berdasarkan system clock
         now_ts = time.time()
         wait_time = 60 - (now_ts % 60)
-        # Tambahkan offset kecil (0.1 detik) untuk memastikan transisi menit sudah sempurna
         time.sleep(wait_time + 0.1)
 
-        # Ambil waktu saat ini dengan presisi menit (detik dan mikrodetik diabaikan)
         current_time = datetime.now().replace(second=0, microsecond=0)
-        
+
         try:
             with db_lock:
                 conn = sqlite3.connect(DB_PATH)
@@ -247,17 +997,13 @@ def scheduler_loop():
                 conn.close()
 
             for cron_expr, command in jobs_in_memory:
-                # Skip job jika command kosong atau hanya berisi spasi
                 if not command or not command.strip():
                     continue
                 try:
-                    # Periksa apakah pattern cron cocok dengan waktu menit ini
                     if croniter.match(cron_expr, current_time):
-                        # Jalankan task tanpa memunculkan window console (penting untuk script PHP/Background task)
                         subprocess.Popen(command, shell=True,
                                          creationflags=subprocess.CREATE_NO_WINDOW)
-                except Exception as e:
-                    # Abaikan error pada pattern tertentu agar loop tetap berjalan
+                except Exception:
                     pass
         except Exception as e:
             add_log(f"Scheduler loop error: {str(e)}", "ERROR")
@@ -267,7 +1013,7 @@ def set_apache_access(external=False, force=False):
     new_mode = 'external' if external else 'local'
     if not force and get_setting('apache_access_mode') == new_mode:
         return
-    conf_path = os.path.join(BASE_PATH, "config", "httpd.conf")
+    conf_path = APACHE_CONF_PATH
     port = get_setting('apache_port', '80')
     if os.path.exists(conf_path):
         with open(conf_path, "r", encoding='utf-8') as f:
@@ -285,12 +1031,12 @@ def set_mysql_access(external=False, force=False):
     new_mode = 'external' if external else 'local'
     if not force and get_setting('mysql_access_mode') == new_mode:
         return
-    conf_path = os.path.join(BASE_PATH, "config", "my.ini")
+    conf_path = MYSQL_CONF_PATH
     port = get_setting('mysql_port', '3306')
     if os.path.exists(conf_path):
         with open(conf_path, "r", encoding='utf-8') as f:
             lines = f.readlines()
-        
+
         new_val = "0.0.0.0" if external else "127.0.0.1"
         found = False
         new_lines = []
@@ -302,9 +1048,8 @@ def set_mysql_access(external=False, force=False):
                 new_lines.append(f"port={port}\n")
             else:
                 new_lines.append(line)
-        
+
         if not found:
-            # Jika tidak ditemukan, sisipkan di bawah section [mysqld]
             final_lines = []
             for line in new_lines:
                 final_lines.append(line)
@@ -322,7 +1067,7 @@ def set_redis_access(external=False, force=False):
     new_mode = 'external' if external else 'local'
     if not force and get_setting('redis_access_mode') == new_mode:
         return
-    conf_path = os.path.join(BASE_PATH, "redis", "redis.windows.conf")
+    conf_path = REDIS_CONF_PATH
     port = get_setting('redis_port', '6379')
     if os.path.exists(conf_path):
         with open(conf_path, "r", encoding='utf-8') as f:
@@ -345,29 +1090,29 @@ class SettingsDialog(QDialog):
         self.setWindowTitle(tr(parent.current_lang, "configuration_title"))
         self.setModal(True)
         self.resize(300, 200)
-        
+
         layout = QGridLayout()
-        
+
         layout.addWidget(QLabel(tr(parent.current_lang, "lbl_apache_port")), 0, 0)
         self.apache_port = QLineEdit(get_setting('apache_port', '80'))
         self.apache_port.setToolTip(tr(parent.current_lang, "help_apache_port"))
         layout.addWidget(self.apache_port, 0, 1)
-        
+
         layout.addWidget(QLabel(tr(parent.current_lang, "lbl_mysql_port")), 1, 0)
         self.mysql_port = QLineEdit(get_setting('mysql_port', '3306'))
         self.mysql_port.setToolTip(tr(parent.current_lang, "help_mysql_port"))
         layout.addWidget(self.mysql_port, 1, 1)
-        
+
         layout.addWidget(QLabel(tr(parent.current_lang, "lbl_redis_port")), 2, 0)
         self.redis_port = QLineEdit(get_setting('redis_port', '6379'))
         self.redis_port.setToolTip(tr(parent.current_lang, "help_redis_port"))
         layout.addWidget(self.redis_port, 2, 1)
-        
+
         layout.addWidget(QLabel(tr(parent.current_lang, "lbl_app_id")), 3, 0)
         self.app_id = QLineEdit(get_setting('app_id', 'planetbiruserver'))
         self.app_id.setToolTip(tr(parent.current_lang, "help_redis_port"))
         layout.addWidget(self.app_id, 3, 1)
-        
+
         self.btn_default = QPushButton(tr(parent.current_lang, "btn_default"))
         self.btn_default.clicked.connect(self.set_defaults)
         layout.addWidget(self.btn_default, 4, 0)
@@ -379,13 +1124,14 @@ class SettingsDialog(QDialog):
         self.setLayout(layout)
         direction = self.parent.get_lang_dir(self.parent.current_lang)
         self.setLayoutDirection(Qt.RightToLeft if direction == 'rtl' else Qt.LeftToRight)
-        
+
     def save(self):
         set_setting('apache_port', self.apache_port.text())
         set_setting('mysql_port', self.mysql_port.text())
         set_setting('redis_port', self.redis_port.text())
         set_setting('app_id', self.app_id.text())
         self.parent.apply_port_settings()
+        register_instance_config()      # ← BARU: update config.db
         self.accept()
 
     def set_defaults(self):
@@ -401,25 +1147,25 @@ class SchedulerDialog(QDialog):
         self.setWindowTitle(tr(parent.current_lang, "scheduler_title"))
         self.setModal(True)
         self.resize(600, 450)
-        
+
         layout = QGridLayout()
-        
+
         layout.addWidget(QLabel(tr(parent.current_lang, "col_cron")), 0, 0)
         self.cron_input = QLineEdit("*/1 * * * *")
         layout.addWidget(self.cron_input, 0, 1, 1, 3)
-        
+
         layout.addWidget(QLabel(tr(parent.current_lang, "col_cmd")), 1, 0)
         self.cmd_input = QLineEdit("")
         layout.addWidget(self.cmd_input, 1, 1, 1, 3)
-        
+
         self.chk_enabled = QCheckBox(tr(parent.current_lang, "lbl_enabled"))
         self.chk_enabled.setChecked(True)
         layout.addWidget(self.chk_enabled, 2, 1, 1, 3)
-        
+
         self.btn_add = QPushButton(tr(parent.current_lang, "btn_add_job"))
         self.btn_add.clicked.connect(self.add_job)
         layout.addWidget(self.btn_add, 3, 1, 1, 1)
-        
+
         self.job_table = QTableWidget()
         self.job_table.setColumnCount(4)
         self.job_table.setHorizontalHeaderLabels([
@@ -430,13 +1176,11 @@ class SchedulerDialog(QDialog):
         ])
         self.job_table.itemClicked.connect(self.on_item_clicked)
         layout.addWidget(self.job_table, 4, 0, 1, 4)
-        
-        btn_layout = QHBoxLayout()
-        btn_layout.setContentsMargins(0, 0, 0, 0)
+
         self.btn_edit = QPushButton(tr(parent.current_lang, "btn_edit_job"))
         self.btn_edit.clicked.connect(self.edit_job)
         layout.addWidget(self.btn_edit, 3, 2, 1, 1)
-        
+
         self.btn_delete = QPushButton(tr(parent.current_lang, "btn_delete_job"))
         self.btn_delete.clicked.connect(self.delete_job)
         layout.addWidget(self.btn_delete, 3, 3, 1, 1)
@@ -461,7 +1205,7 @@ class SchedulerDialog(QDialog):
             cur.execute("SELECT id, cron_expr, command, enabled FROM jobs")
             jobs = cur.fetchall()
             conn.close()
-            
+
         for row_data in jobs:
             row_num = self.job_table.rowCount()
             self.job_table.insertRow(row_num)
@@ -469,7 +1213,6 @@ class SchedulerDialog(QDialog):
                 val = str(data)
                 if i == 3: val = tr(self.parent.current_lang, "status_enabled") if data == 1 else tr(self.parent.current_lang, "status_disabled")
                 self.job_table.setItem(row_num, i, QTableWidgetItem(val))
-        conn.close()
         self.job_table.resizeColumnsToContents()
 
     def add_job(self):
@@ -485,7 +1228,7 @@ class SchedulerDialog(QDialog):
         with db_lock:
             conn = sqlite3.connect(DB_PATH)
             cur = conn.cursor()
-            cur.execute("INSERT INTO jobs (cron_expr, command, enabled) VALUES (?, ?, ?)", 
+            cur.execute("INSERT INTO jobs (cron_expr, command, enabled) VALUES (?, ?, ?)",
                         (cron, cmd, 1 if self.chk_enabled.isChecked() else 0))
             conn.commit()
             conn.close()
@@ -507,7 +1250,7 @@ class SchedulerDialog(QDialog):
             with db_lock:
                 conn = sqlite3.connect(DB_PATH)
                 cur = conn.cursor()
-                cur.execute("UPDATE jobs SET cron_expr=?, command=?, enabled=? WHERE id=?", 
+                cur.execute("UPDATE jobs SET cron_expr=?, command=?, enabled=? WHERE id=?",
                             (cron, cmd, 1 if self.chk_enabled.isChecked() else 0, job_id))
                 conn.commit()
                 conn.close()
@@ -541,21 +1284,21 @@ class StartupDialog(QDialog):
         self.setWindowTitle(tr(parent.current_lang, "startup_title"))
         self.setModal(True)
         self.resize(600, 450)
-        
+
         layout = QGridLayout()
-        
+
         layout.addWidget(QLabel(tr(parent.current_lang, "col_cmd")), 0, 0)
         self.cmd_input = QLineEdit("")
         layout.addWidget(self.cmd_input, 0, 1, 1, 3)
-        
+
         self.chk_enabled = QCheckBox(tr(parent.current_lang, "lbl_enabled"))
         self.chk_enabled.setChecked(True)
         layout.addWidget(self.chk_enabled, 1, 1)
-        
+
         self.btn_add = QPushButton(tr(parent.current_lang, "btn_add_job"))
         self.btn_add.clicked.connect(self.add_task)
         layout.addWidget(self.btn_add, 2, 1, 1, 1)
-        
+
         self.task_table = QTableWidget()
         self.task_table.setColumnCount(5)
         self.task_table.setHorizontalHeaderLabels([
@@ -567,7 +1310,7 @@ class StartupDialog(QDialog):
         ])
         self.task_table.itemClicked.connect(self.on_item_clicked)
         layout.addWidget(self.task_table, 3, 0, 1, 4)
-        
+
         self.btn_start = QPushButton(tr(parent.current_lang, "btn_start_task"))
         self.btn_start.clicked.connect(self.manual_start)
         layout.addWidget(self.btn_start, 4, 0, 1, 2)
@@ -579,14 +1322,14 @@ class StartupDialog(QDialog):
         self.btn_edit = QPushButton(tr(parent.current_lang, "btn_edit_job"))
         self.btn_edit.clicked.connect(self.edit_task)
         layout.addWidget(self.btn_edit, 2, 2, 1, 1)
-        
+
         self.btn_delete = QPushButton(tr(parent.current_lang, "btn_delete_job"))
         self.btn_delete.clicked.connect(self.delete_task)
         layout.addWidget(self.btn_delete, 2, 3, 1, 1)
 
         self.setLayout(layout)
         self.load_tasks()
-        
+
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.load_tasks)
         self.timer.start(3000)
@@ -609,21 +1352,21 @@ class StartupDialog(QDialog):
             cur.execute("SELECT id, command, enabled, pid FROM startup_tasks")
             tasks = cur.fetchall()
             conn.close()
-            
+
         for row_num, row_data in enumerate(tasks):
             self.task_table.insertRow(row_num)
             tid, cmd, enabled, pid = row_data
-            
+
             is_running = is_pid_running(pid)
             status_text = tr(self.parent.current_lang, "status_running") if is_running else tr(self.parent.current_lang, "status_finished")
             enabled_text = tr(self.parent.current_lang, "status_enabled") if enabled == 1 else tr(self.parent.current_lang, "status_disabled")
-            
+
             self.task_table.setItem(row_num, 0, QTableWidgetItem(str(tid)))
             self.task_table.setItem(row_num, 1, QTableWidgetItem(cmd))
             self.task_table.setItem(row_num, 2, QTableWidgetItem(status_text))
             self.task_table.setItem(row_num, 3, QTableWidgetItem(enabled_text))
             self.task_table.setItem(row_num, 4, QTableWidgetItem(str(pid)))
-            
+
         if current_row >= 0:
             self.task_table.setCurrentCell(current_row, 0)
         self.task_table.resizeColumnsToContents()
@@ -631,13 +1374,13 @@ class StartupDialog(QDialog):
     def add_task(self):
         cmd = self.cmd_input.text().strip()
         if not cmd:
-            QMessageBox.warning(self, tr(self.parent.current_lang, "error_title"), 
+            QMessageBox.warning(self, tr(self.parent.current_lang, "error_title"),
                                 tr(self.parent.current_lang, "msg_command_empty"))
             return
         with db_lock:
             conn = sqlite3.connect(DB_PATH)
             cur = conn.cursor()
-            cur.execute("INSERT INTO startup_tasks (command, enabled) VALUES (?, ?)", 
+            cur.execute("INSERT INTO startup_tasks (command, enabled) VALUES (?, ?)",
                         (cmd, 1 if self.chk_enabled.isChecked() else 0))
             conn.commit()
             conn.close()
@@ -650,17 +1393,17 @@ class StartupDialog(QDialog):
             if is_pid_running(pid):
                 QMessageBox.warning(self, "Error", tr(self.parent.current_lang, "msg_task_running_edit_error"))
                 return
-            
+
             cmd = self.cmd_input.text().strip()
             if not cmd:
-                QMessageBox.warning(self, tr(self.parent.current_lang, "error_title"), 
+                QMessageBox.warning(self, tr(self.parent.current_lang, "error_title"),
                                     tr(self.parent.current_lang, "msg_command_empty"))
                 return
             task_id = self.task_table.item(curr, 0).text()
             with db_lock:
                 conn = sqlite3.connect(DB_PATH)
                 cur = conn.cursor()
-                cur.execute("UPDATE startup_tasks SET command=?, enabled=? WHERE id=?", 
+                cur.execute("UPDATE startup_tasks SET command=?, enabled=? WHERE id=?",
                             (cmd, 1 if self.chk_enabled.isChecked() else 0, task_id))
                 conn.commit()
                 conn.close()
@@ -699,7 +1442,7 @@ class StartupDialog(QDialog):
             task_id = self.task_table.item(curr, 0).text()
             cmd = self.task_table.item(curr, 1).text()
             pid = int(self.task_table.item(curr, 4).text())
-            
+
             if not is_pid_running(pid):
                 self.parent.run_single_startup_task(task_id, cmd)
                 time.sleep(0.5)
@@ -712,8 +1455,8 @@ class StartupDialog(QDialog):
             task_id = self.task_table.item(curr, 0).text()
             if is_pid_running(pid):
                 try:
-                    subprocess.run(["taskkill", "/F", "/PID", str(pid)], 
-                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, 
+                    subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                    creationflags=subprocess.CREATE_NO_WINDOW)
                     with db_lock:
                         conn = sqlite3.connect(DB_PATH)
@@ -747,7 +1490,6 @@ class RedisViewerDialog(QDialog):
 
         layout = QVBoxLayout()
 
-        # Filter Area
         filter_layout = QHBoxLayout()
         self.filter_input = QLineEdit()
         self.filter_input.setPlaceholderText(tr(lang, "help_search_redis"))
@@ -761,14 +1503,13 @@ class RedisViewerDialog(QDialog):
             self.db_selector.addItem(str(i))
         self.db_selector.currentIndexChanged.connect(self.load_data)
         filter_layout.addWidget(self.db_selector)
-        
+
         self.btn_refresh = QPushButton(tr(lang, "btn_refresh"))
         self.btn_refresh.clicked.connect(self.load_data)
         filter_layout.addWidget(self.btn_refresh)
-        
+
         layout.addLayout(filter_layout)
 
-        # Table Area
         self.table = QTableWidget()
         self.table.setColumnCount(4)
         self.table.setHorizontalHeaderLabels([
@@ -777,12 +1518,12 @@ class RedisViewerDialog(QDialog):
             tr(lang, "col_redis_ttl"),
             tr(lang, "col_redis_value")
         ])
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers) # Read-only
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         layout.addWidget(self.table)
 
         self.setLayout(layout)
         self.load_data()
-        
+
         direction = self.parent.get_lang_dir(lang)
         self.setLayoutDirection(Qt.RightToLeft if direction == 'rtl' else Qt.LeftToRight)
 
@@ -793,21 +1534,20 @@ class RedisViewerDialog(QDialog):
         cli = self.get_redis_cli_path()
         if not os.path.exists(cli):
             return None
-        
+
         port = get_setting('redis_port', '6379')
         cmd = [cli, "-p", port]
 
         if db_index is not None:
             cmd.extend(["-n", str(db_index)])
-        
-        # Cek password dari config
+
         pwd = self.get_password_from_conf()
         if pwd:
             cmd.extend(["-a", pwd, "--no-auth-warning"])
-            
+
         cmd.extend(args)
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, 
+            result = subprocess.run(cmd, capture_output=True, text=True,
                                     creationflags=subprocess.CREATE_NO_WINDOW, timeout=2)
             if result.returncode == 0:
                 return result.stdout.strip()
@@ -816,7 +1556,7 @@ class RedisViewerDialog(QDialog):
         return None
 
     def get_password_from_conf(self):
-        conf_path = os.path.join(BASE_PATH, "redis", "redis.windows.conf")
+        conf_path = REDIS_CONF_PATH
         if os.path.exists(conf_path):
             try:
                 with open(conf_path, "r", encoding='utf-8') as f:
@@ -830,20 +1570,15 @@ class RedisViewerDialog(QDialog):
     def load_data(self):
         self.table.setRowCount(0)
         db_idx = self.db_selector.currentIndex()
-        # Get all keys
         keys_raw = self.run_redis_cmd(["keys", "*"], db_index=db_idx)
         if not keys_raw:
             return
 
         keys = keys_raw.splitlines()
         for key in keys:
-            # Get Type
             rtype = self.run_redis_cmd(["type", key], db_index=db_idx) or "unknown"
-            
-            # Get TTL
             rttl = self.run_redis_cmd(["ttl", key], db_index=db_idx) or "-1"
-            
-            # Get Value based on type
+
             val = ""
             if rtype == "string":
                 val = self.run_redis_cmd(["get", key], db_index=db_idx)
@@ -855,14 +1590,14 @@ class RedisViewerDialog(QDialog):
                 val = self.run_redis_cmd(["hgetall", key], db_index=db_idx)
             elif rtype == "zset":
                 val = self.run_redis_cmd(["zrange", key, "0", "-1"], db_index=db_idx)
-            
+
             row = self.table.rowCount()
             self.table.insertRow(row)
             self.table.setItem(row, 0, QTableWidgetItem(key))
             self.table.setItem(row, 1, QTableWidgetItem(rtype))
             self.table.setItem(row, 2, QTableWidgetItem(rttl))
             self.table.setItem(row, 3, QTableWidgetItem(str(val)))
-        
+
         self.table.resizeColumnsToContents()
 
     def filter_data(self):
@@ -879,44 +1614,42 @@ class MariaDBPasswordDialog(QDialog):
         self.setWindowTitle(tr(parent.current_lang, "db_password_title"))
         self.setModal(True)
         self.resize(350, 200)
-        
+
         layout = QGridLayout()
-        
+
         layout.addWidget(QLabel(tr(parent.current_lang, "lbl_current_password")), 0, 0)
         self.current_pass_input = QLineEdit()
         self.current_pass_input.setEchoMode(QLineEdit.Password)
         layout.addWidget(self.current_pass_input, 0, 1)
-        
+
         layout.addWidget(QLabel(tr(parent.current_lang, "lbl_new_password")), 1, 0)
         self.new_pass_input = QLineEdit()
         self.new_pass_input.setEchoMode(QLineEdit.Password)
         layout.addWidget(self.new_pass_input, 1, 1)
-        
+
         layout.addWidget(QLabel(tr(parent.current_lang, "lbl_repeat_password")), 2, 0)
         self.repeat_pass_input = QLineEdit()
         self.repeat_pass_input.setEchoMode(QLineEdit.Password)
         layout.addWidget(self.repeat_pass_input, 2, 1)
-        
+
         self.chk_force_reset = QCheckBox(tr(parent.current_lang, "chk_force_reset"))
         layout.addWidget(self.chk_force_reset, 3, 1)
-        
+
         self.btn_change = QPushButton(tr(parent.current_lang, "btn_change_password"))
         self.btn_change.clicked.connect(self.change_password)
         layout.addWidget(self.btn_change, 4, 0, 1, 2)
-        
+
         self.setLayout(layout)
         direction = self.parent.get_lang_dir(self.parent.current_lang)
         self.setLayoutDirection(Qt.RightToLeft if direction == 'rtl' else Qt.LeftToRight)
 
     def change_password(self):
-        # 1. Ambil input dan bersihkan spasi jika perlu
         curr_pass = self.current_pass_input.text()
         new_pass = self.new_pass_input.text()
         repeat_pass = self.repeat_pass_input.text()
         force = self.chk_force_reset.isChecked()
         lang = self.parent.current_lang
 
-        # 2. Validasi Dasar
         if not new_pass:
             QMessageBox.warning(self, tr(lang, "error_title"), tr(lang, "msg_new_password_can_not_be_empty"))
             return
@@ -925,31 +1658,25 @@ class MariaDBPasswordDialog(QDialog):
             QMessageBox.warning(self, tr(lang, "error_title"), tr(lang, "msg_password_mismatch"))
             return
 
-        # Escape single quotes untuk keamanan SQL manual
-        # Ini mencegah password seperti "Jum'at" merusak query
         escaped_pass = new_pass.replace("'", "''")
 
         if force:
-            # Security Check for Force Reset
             admin_hash = get_setting('admin_password_hash', '')
-            
+
             if not admin_hash:
-                # Setup new admin password if not exists
                 msg = textwrap.fill(tr(lang, "msg_setup_admin_pass"), width=55)
-                ans, ok = QInputDialog.getText(self, tr(lang, "lbl_admin_password_setup"), 
+                ans, ok = QInputDialog.getText(self, tr(lang, "lbl_admin_password_setup"),
                                               msg, QLineEdit.Password)
                 if ok and ans:
                     hashed = hashlib.sha256(ans.encode()).hexdigest()
                     set_setting('admin_password_hash', hashed)
                     QMessageBox.information(self, tr(lang, "success_title"), tr(lang, "msg_admin_password_created"))
                 else:
-                    # User cancelled or empty
                     if ok: QMessageBox.warning(self, tr(lang, "error_title"), tr(lang, "msg_new_password_can_not_be_empty"))
                     return
             else:
-                # Verify existing admin password
                 msg = textwrap.fill(tr(lang, "msg_enter_admin_pass"), width=55)
-                ans, ok = QInputDialog.getText(self, tr(lang, "lbl_admin_password_verify"), 
+                ans, ok = QInputDialog.getText(self, tr(lang, "lbl_admin_password_verify"),
                                               msg, QLineEdit.Password)
                 if ok:
                     input_hash = hashlib.sha256(ans.encode()).hexdigest()
@@ -961,62 +1688,53 @@ class MariaDBPasswordDialog(QDialog):
 
             self.parent.stop_service("mysql")
             time.sleep(1)
-            
-            init_file = os.path.join(BASE_PATH, "tmp", "reset_pass.sql")
+
+            init_file = os.path.join(INSTANCE_TMP_DIR, "reset_pass.sql")
             os.makedirs(os.path.dirname(init_file), exist_ok=True)
-            
-            # Gunakan FLUSH PRIVILEGES agar perubahan langsung terbaca
+
             sql_cmd = f"FLUSH PRIVILEGES;\nALTER USER 'root'@'localhost' IDENTIFIED BY '{escaped_pass}';\n"
-            
+
             try:
-                # Gunakan encoding utf-8 agar mendukung password non-ASCII jika user memaksa
                 with open(init_file, "w", encoding='utf-8') as f:
                     f.write(sql_cmd)
-                
-                conf = os.path.join(BASE_PATH, "config", "my.ini")
-                # Tambahkan --skip-grant-tables jika perlu, tapi --init-file biasanya sudah cukup
-                args = [MYSQL_PATH, f"--defaults-file={conf}", f"--init-file={init_file}", "--console"]
-                
-                proc = subprocess.Popen(args, cwd=os.path.join(BASE_PATH, "mysql"), 
+
+                args = [MYSQL_PATH, f"--defaults-file={MYSQL_CONF_PATH}", f"--init-file={init_file}", "--console"]
+
+                proc = subprocess.Popen(args, cwd=os.path.join(BASE_PATH, "mysql"),
                                        creationflags=subprocess.CREATE_NO_WINDOW)
-                
-                # Beri waktu sedikit lebih lama agar MariaDB benar-benar siap
-                time.sleep(3) 
-                
-                # Matikan proses sementara tadi
-                subprocess.run(["taskkill", "/F", "/PID", str(proc.pid)], 
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, 
+
+                time.sleep(3)
+
+                subprocess.run(["taskkill", "/F", "/PID", str(proc.pid)],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                creationflags=subprocess.CREATE_NO_WINDOW)
-                
+
                 if os.path.exists(init_file):
                     os.remove(init_file)
-                
+
                 QMessageBox.information(self, tr(lang, "success_title"), tr(lang, "msg_password_changed_success"))
                 self.accept()
             except Exception as e:
                 add_log(f"Force reset failed: {str(e)}", "ERROR")
                 QMessageBox.critical(self, tr(lang, "error_title"), f"{tr(lang, 'msg_password_change_failed')}\n{str(e)}")
         else:
-            # Standard change logic
             client_path = os.path.join(BASE_PATH, "mysql", "bin", "mariadb.exe")
             if not os.path.exists(client_path):
                 client_path = os.path.join(BASE_PATH, "mysql", "bin", "mysql.exe")
-                
+
             if not os.path.exists(client_path):
                 QMessageBox.critical(self, tr(lang, "error_title"), "MariaDB client not found.")
                 return
 
-            # Gunakan subprocess.run dengan input untuk keamanan (menghindari pass di argumen CMD)
             sql = f"ALTER USER 'root'@'localhost' IDENTIFIED BY '{escaped_pass}';"
             cmd = [client_path, "-u", "root"]
             if curr_pass:
-                # Menempelkan password ke -p (misal -proot123)
                 cmd.append(f"-p{curr_pass}")
-            
+
             cmd.extend(["-e", sql])
-            
+
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True, 
+                result = subprocess.run(cmd, capture_output=True, text=True,
                                         creationflags=subprocess.CREATE_NO_WINDOW)
                 if result.returncode == 0:
                     QMessageBox.information(self, tr(lang, "success_title"), tr(lang, "msg_password_changed_success"))
@@ -1038,35 +1756,35 @@ class RedisPasswordDialog(QDialog):
         self.setWindowTitle(tr(lang, "redis_password_title"))
         self.setModal(True)
         self.resize(350, 120)
-        
+
         layout = QGridLayout()
         layout.addWidget(QLabel(tr(lang, "lbl_redis_password")), 0, 0)
         self.pass_input = QLineEdit()
         self.pass_input.setEchoMode(QLineEdit.Password)
         layout.addWidget(self.pass_input, 0, 1)
-        
+
         self.btn_save = QPushButton(tr(lang, "btn_save"))
         self.btn_save.clicked.connect(self.save_password)
         layout.addWidget(self.btn_save, 1, 0, 1, 2)
-        
+
         self.setLayout(layout)
         direction = self.parent.get_lang_dir(lang)
         self.setLayoutDirection(Qt.RightToLeft if direction == 'rtl' else Qt.LeftToRight)
 
     def save_password(self):
         new_pass = self.pass_input.text().strip()
-        template_name = "redis.windows-service-template.conf"
-        template_path = os.path.join(BASE_PATH, "config", template_name)
         lang = self.parent.current_lang
-        
-        if not os.path.exists(template_path):
+
+        # Gunakan template per-instance (auto-create dari canonical)
+        template_path = _ensure_instance_template(TEMPLATE_REDIS)
+        if not template_path:
             QMessageBox.warning(self, tr(lang, "error_title"), tr(lang, "msg_file_not_found"))
             return
 
         try:
             with open(template_path, "r", encoding='utf-8') as f:
                 lines = f.readlines()
-            
+
             new_lines = []
             found = False
             for line in lines:
@@ -1080,13 +1798,13 @@ class RedisPasswordDialog(QDialog):
                     continue
                 else:
                     new_lines.append(line)
-            
+
             if not found and new_pass:
                 new_lines.append(f"\nrequirepass {new_pass}\n")
-            
+
             with open(template_path, "w", encoding='utf-8') as f:
                 f.writelines(new_lines)
-            
+
             self.parent.apply_port_settings()
             QMessageBox.information(self, tr(lang, "success_title"), tr(lang, "msg_redis_password_changed_success"))
             self.accept()
@@ -1094,11 +1812,11 @@ class RedisPasswordDialog(QDialog):
             QMessageBox.critical(self, tr(lang, "error_title"), str(e))
 
 class ControlPanel(QWidget):
-    service_status_changed = pyqtSignal(str) # Signal harus didefinisikan di level kelas
+    service_status_changed = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Planetbiru Server")
+        self.setWindowTitle(f"Planetbiru Server - {APP_NAME}")
         self.move(100, 100)
         width = int(get_setting('window_width', '800'))
         height = int(get_setting('window_height', '600'))
@@ -1110,13 +1828,12 @@ class ControlPanel(QWidget):
         self.resize_timer = QTimer()
         self.resize_timer.setSingleShot(True)
         self.resize_timer.timeout.connect(self.save_window_size)
-        
-        # Track services currently in transition (starting/stopping)
+
         self.busy_services = {}
         self.busy_lock = threading.Lock()
-        self.service_status_changed.connect(self.update_service_ui) # Hubungkan signal ke method update UI
+        self.service_status_changed.connect(self.update_service_ui)
 
-        # Tombol Apache (Gunakan satu tombol untuk Start/Stop)
+        # Tombol Apache
         self.btn_apache_toggle = QPushButton()
         self.btn_apache_toggle.clicked.connect(lambda: self.toggle_service_action("apache", APACHE_PATH))
         self.btn_apache_access_toggle = QPushButton()
@@ -1134,7 +1851,7 @@ class ControlPanel(QWidget):
         self.btn_redis_access_toggle = QPushButton()
         self.btn_redis_access_toggle.clicked.connect(lambda: self.toggle_access_action("redis"))
 
-        # Menu for Apache Configuration Dropdown
+        # Menu Apache Configuration
         self.apache_config_menu = QMenu(self)
         self.action_httpd_conf = QAction("httpd.conf", self)
         if os.path.exists(os.path.join(BUNDLE_PATH, "apache.png")):
@@ -1147,14 +1864,12 @@ class ControlPanel(QWidget):
         self.apache_config_menu.addAction(self.action_httpd_conf)
         self.apache_config_menu.addAction(self.action_php_ini)
 
-        # Tambahkan padding horizontal agar caption tidak menyentuh tepi tombol
         self.setStyleSheet("""
             QPushButton {
                 padding-left: 15px;
                 padding-right: 15px;
                 min-height: 25px;
             }
-
             QComboBox, QLineEdit {
                 padding-left: 8px;
                 padding-right: 8px;
@@ -1162,22 +1877,19 @@ class ControlPanel(QWidget):
             }
         """)
 
-        # Set Window Icon
         icon_path = os.path.join(BUNDLE_PATH, "icon.ico")
         if os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
 
         self.current_lang = get_setting('language', 'en')
-
         self.apply_layout_direction()
 
         # System Tray Icon
-
         maximize_path = os.path.join(BUNDLE_PATH, "maximize.png")
         self.tray_icon = QSystemTrayIcon(self)
         if os.path.exists(icon_path):
             self.tray_icon.setIcon(QIcon(icon_path))
-        
+
         self.tray_menu = QMenu()
         self.show_action = QAction("", self)
         if os.path.exists(maximize_path):
@@ -1190,7 +1902,6 @@ class ControlPanel(QWidget):
             self.minimize_action.setIcon(QIcon(minimize_path))
         self.minimize_action.triggered.connect(self.hide_to_tray)
 
-        # Actions for All Services
         self.start_all_action = QAction("", self)
         start_icon = os.path.join(BUNDLE_PATH, "start.png")
         self.start_all_action.setIcon(QIcon(start_icon) if os.path.exists(start_icon) else self.style().standardIcon(QStyle.SP_MediaPlay))
@@ -1212,14 +1923,13 @@ class ControlPanel(QWidget):
         self.offline_all_action.triggered.connect(self.set_all_offline)
 
         self.exit_action = QAction("", self)
-        # Gunakan exit.png jika tersedia, jika tidak gunakan icon standar sistem
         exit_icon_path = os.path.join(BUNDLE_PATH, "exit.png")
         if os.path.exists(exit_icon_path):
             self.exit_action.setIcon(QIcon(exit_icon_path))
         else:
             self.exit_action.setIcon(self.style().standardIcon(QStyle.SP_DialogCloseButton))
         self.exit_action.triggered.connect(QApplication.instance().quit)
-        
+
         self.tray_menu.addAction(self.show_action)
         self.tray_menu.addAction(self.minimize_action)
         self.tray_menu.addSeparator()
@@ -1230,7 +1940,7 @@ class ControlPanel(QWidget):
         self.tray_menu.addAction(self.offline_all_action)
         self.tray_menu.addSeparator()
 
-        # Individual Service Menus in Tray (Toggle Support)
+        # Individual Service Menus in Tray
         self.apache_tray_menu = self.tray_menu.addMenu("Apache")
         apache_icon_path = os.path.join(BUNDLE_PATH, "apache.png")
         if os.path.exists(apache_icon_path):
@@ -1273,13 +1983,9 @@ class ControlPanel(QWidget):
         # Dropdown bahasa
         self.lang_selector = QComboBox()
         for lang_code in get_languages():
-            # Menampilkan nama (misal: Indonesia) tapi menyimpan kode (misal: id) sebagai data
             self.lang_selector.addItem(tr(lang_code, "lang_name"), lang_code)
-        
-        # Set posisi dropdown sesuai bahasa default
         index = self.lang_selector.findData(self.current_lang)
         if index >= 0: self.lang_selector.setCurrentIndex(index)
-        
         self.lang_selector.currentIndexChanged.connect(self.change_language)
 
         # Checkboxes Settings
@@ -1316,11 +2022,11 @@ class ControlPanel(QWidget):
         self.mysql_status = QLabel()
         self.redis_status = QLabel()
 
-        # Service Buttons (Access & Config)
+        # Service Buttons
         self.btn_apache_config = QPushButton()
         self.btn_apache_config.setMenu(self.apache_config_menu)
         self.btn_apache_www = QPushButton()
-        self.btn_apache_www.clicked.connect(lambda: os.startfile(os.path.join(BASE_PATH, "www")))
+        self.btn_apache_www.clicked.connect(lambda: os.startfile(INSTANCE_WWW_DIR))
 
         self.btn_mysql_config = QPushButton()
         self.btn_mysql_config.clicked.connect(lambda: self.open_config("mysql", True))
@@ -1344,7 +2050,7 @@ class ControlPanel(QWidget):
         self.btn_view_logs = QPushButton()
 
         self.logs_menu = QMenu(self)
-        
+
         self.apache_logs_menu = self.logs_menu.addMenu("Apache")
         apache_icon_path = os.path.join(BUNDLE_PATH, "apache.png")
         if os.path.exists(apache_icon_path):
@@ -1352,10 +2058,10 @@ class ControlPanel(QWidget):
 
         self.action_apache_error = QAction("", self)
         self.action_apache_error.setIcon(self.style().standardIcon(QStyle.SP_MessageBoxCritical))
-        self.action_apache_error.triggered.connect(lambda: self.open_log_in_notepad("apache/logs/error.log"))
+        self.action_apache_error.triggered.connect(lambda: self.open_log_in_notepad(f"instances/{APP_NAME}/logs/apache-error.log"))
         self.action_apache_access = QAction("", self)
         self.action_apache_access.setIcon(self.style().standardIcon(QStyle.SP_FileDialogContentsView))
-        self.action_apache_access.triggered.connect(lambda: self.open_log_in_notepad("apache/logs/access.log"))
+        self.action_apache_access.triggered.connect(lambda: self.open_log_in_notepad(f"instances/{APP_NAME}/logs/apache-access.log"))
         self.apache_logs_menu.addAction(self.action_apache_error)
         self.apache_logs_menu.addAction(self.action_apache_access)
 
@@ -1366,7 +2072,7 @@ class ControlPanel(QWidget):
 
         self.action_php_error = QAction("", self)
         self.action_php_error.setIcon(self.style().standardIcon(QStyle.SP_MessageBoxCritical))
-        self.action_php_error.triggered.connect(lambda: self.open_log_in_notepad("logs/php_error.log"))
+        self.action_php_error.triggered.connect(lambda: self.open_log_in_notepad(f"instances/{APP_NAME}/logs/php_error.log"))
         self.php_logs_menu.addAction(self.action_php_error)
 
         self.mysql_logs_menu = self.logs_menu.addMenu("MariaDB")
@@ -1376,7 +2082,7 @@ class ControlPanel(QWidget):
 
         self.action_mysql_error = QAction("", self)
         self.action_mysql_error.setIcon(self.style().standardIcon(QStyle.SP_MessageBoxCritical))
-        self.action_mysql_error.triggered.connect(lambda: self.open_log_in_notepad("logs/mariadb.log"))
+        self.action_mysql_error.triggered.connect(lambda: self.open_log_in_notepad(f"instances/{APP_NAME}/logs/mariadb.log"))
         self.mysql_logs_menu.addAction(self.action_mysql_error)
 
         self.redis_logs_menu = self.logs_menu.addMenu("Redis")
@@ -1386,20 +2092,20 @@ class ControlPanel(QWidget):
 
         self.action_redis_log = QAction("", self)
         self.action_redis_log.setIcon(self.style().standardIcon(QStyle.SP_FileDialogInfoView))
-        self.action_redis_log.triggered.connect(lambda: self.open_log_in_notepad("logs/redis.log"))
+        self.action_redis_log.triggered.connect(lambda: self.open_log_in_notepad(f"instances/{APP_NAME}/logs/redis.log"))
         self.redis_logs_menu.addAction(self.action_redis_log)
         self.btn_view_logs.setMenu(self.logs_menu)
 
         self.btn_redis_config = QPushButton()
         self.btn_redis_config.clicked.connect(lambda: self.open_config("redis", True))
-        
+
         self.btn_redis_data = QPushButton()
         self.redis_data_menu = QMenu(self)
         self.action_redis_cli = QAction("", self)
         if os.path.exists(os.path.join(BUNDLE_PATH, "redis.png")):
             self.action_redis_cli.setIcon(QIcon(os.path.join(BUNDLE_PATH, "redis.png")))
         self.action_redis_cli.triggered.connect(lambda: subprocess.Popen(
-            [os.path.join(BASE_PATH, "redis", "redis-cli.exe")], 
+            [os.path.join(BASE_PATH, "redis", "redis-cli.exe"), "-p", get_setting('redis_port', '6379')],
             creationflags=subprocess.CREATE_NEW_CONSOLE
         ))
         self.action_redis_viewer = QAction("", self)
@@ -1421,67 +2127,57 @@ class ControlPanel(QWidget):
         self.btn_clear_logs.clicked.connect(self.clear_logs)
 
         self.load_logs()
-
         log_signal.updated.connect(self.load_logs)
 
-        # --- Layout setup (Grid) ---
+        # --- Layout setup ---
         layout = QGridLayout()
         layout.setSpacing(10)
 
-        # Baris 0: Bahasa & Browser
         layout.addWidget(self.lang_selector, 0, 2, 1, 1)
         layout.addWidget(self.btn_open_browser, 0, 4, 1, 1)
         layout.addWidget(self.btn_minimize, 0, 5, 1, 1)
-        
+
         layout.addWidget(self.btn_view_logs, 0, 3, 1, 1)
         layout.addWidget(self.btn_scheduler_settings, 1, 2, 1, 1)
         layout.addWidget(self.btn_startup_settings, 1, 3, 1, 1)
         layout.addWidget(self.btn_app_configuration, 1, 4, 1, 1)
         layout.addWidget(self.btn_mysql_password, 1, 5)
 
-        # Baris 2: Apache (Status, Run, Stop, Local, External)
         layout.addWidget(self.apache_status, 2, 0, 1, 2)
         layout.addWidget(self.btn_apache_toggle, 2, 2)
         layout.addWidget(self.btn_apache_access_toggle, 2, 3)
         layout.addWidget(self.btn_apache_config, 2, 4)
         layout.addWidget(self.btn_apache_www, 2, 5)
 
-        # Baris 3: MySQL
         layout.addWidget(self.mysql_status, 3, 0, 1, 2)
         layout.addWidget(self.btn_mysql_toggle, 3, 2)
         layout.addWidget(self.btn_mysql_access_toggle, 3, 3)
         layout.addWidget(self.btn_mysql_config, 3, 4)
         layout.addWidget(self.btn_mysql_pma, 3, 5)
-        
-        # Baris 4: Redis
+
         layout.addWidget(self.redis_status, 4, 0, 1, 2)
         layout.addWidget(self.btn_redis_toggle, 4, 2)
         layout.addWidget(self.btn_redis_access_toggle, 4, 3)
         layout.addWidget(self.btn_redis_config, 4, 4)
         layout.addWidget(self.btn_redis_data, 4, 5)
 
-        # Baris 5 dan 6: Global Settings
         layout.addWidget(self.chk_run_startup, 0, 0, 1, 2)
         layout.addWidget(self.chk_auto_start_services, 1, 0, 1, 2)
 
-        # Baris 5: Label Log & Tombol Clear
         layout.addWidget(self.log_label, 5, 0, 1, 5)
         layout.addWidget(self.search_input, 5, 2, 1, 3)
         layout.addWidget(self.btn_clear_logs, 5, 5)
 
-        # Baris 6: Tabel Log
         layout.addWidget(self.log_table, 6, 0, 1, 6)
 
         self.setLayout(layout)
 
-        # Simpan proses manual
         self.apache_proc = None
         self.mysql_proc = None
         self.redis_proc = None
 
         self.update_texts()
 
-        # Timer to periodically update service status
         self.status_timer = QTimer()
         self.status_timer.timeout.connect(self.update_service_status)
         self.status_timer.start(2000)
@@ -1501,19 +2197,16 @@ class ControlPanel(QWidget):
             "redis": int(get_setting('redis_port', '6379'))
         }
         pid = int(get_setting(f"{name}_pid", "0"))
-        
-        # Gunakan kombinasi Port dan PID untuk deteksi yang lebih reliabel
-        # Jika salah satu aktif, maka kita anggap layanan sedang berjalan dan ingin dihentikan
+
         if is_port_in_use(port_map[name]) or is_pid_running(pid):
             self.stop_service(name)
         else:
             self.run_service(name, path)
-            
+
     def toggle_access_action(self, name):
-        # Gunakan database sebagai referensi status, bukan pembacaan file fisik
         is_online = get_setting(f"{name}_access_mode", "local") == "external"
         self.change_access(name, not is_online)
-            
+
     def open_config_file(self, config_path):
         try:
             if not os.path.exists(config_path):
@@ -1525,29 +2218,28 @@ class ControlPanel(QWidget):
 
     def open_config(self, service, use_notepad=True):
         try:
-            # Mapping path config per service
-            config_map = {
-                "apache": os.path.join(BASE_PATH, "config", "httpd-template.conf"),
-                "mysql": os.path.join(BASE_PATH, "config", "my-template.ini"),
-                "redis": os.path.join(BASE_PATH, "config", "redis.windows-service-template.conf"),
-                "php": os.path.join(BASE_PATH, "config", "php-template.ini"),
+            canonical_map = {
+                "apache": TEMPLATE_HTTPD,
+                "mysql":  TEMPLATE_MYSQL,
+                "redis":  TEMPLATE_REDIS,
+                "php":    TEMPLATE_PHP,
             }
 
-            if service not in config_map:
-                QMessageBox.warning(self, tr(self.current_lang, "fatal_error_title"), f"{tr(self.current_lang, 'msg_unknown_service')}\n{service}")
+            if service not in canonical_map:
+                QMessageBox.warning(self, tr(self.current_lang, "fatal_error_title"),
+                                    f"{tr(self.current_lang, 'msg_unknown_service')}\n{service}")
                 return
 
-            config_path = config_map[service]
-
-            if not os.path.exists(config_path):
-                QMessageBox.warning(self, tr(self.current_lang, "fatal_error_title"), f"{tr(self.current_lang, 'msg_file_not_found')}\n{config_path}")
+            # Pastikan instance template sudah ada (auto-copy dari canonical)
+            config_path = _ensure_instance_template(canonical_map[service])
+            if not config_path:
+                QMessageBox.warning(self, tr(self.current_lang, "fatal_error_title"),
+                                    f"{tr(self.current_lang, 'msg_file_not_found')}\n{service}")
                 return
 
-            # Buka dengan Notepad (default Windows)
             if use_notepad:
                 subprocess.Popen(["notepad.exe", config_path])
             else:
-                # fallback: buka dengan default app
                 os.startfile(config_path)
 
         except Exception as e:
@@ -1556,7 +2248,7 @@ class ControlPanel(QWidget):
     def get_lang_dir(self, lang):
         if lang in config and 'lang_dir' in config[lang]:
             return config[lang]['lang_dir'].lower()
-        return 'ltr'  # default
+        return 'ltr'
 
     def apply_layout_direction(self):
         direction = self.get_lang_dir(self.current_lang)
@@ -1568,18 +2260,15 @@ class ControlPanel(QWidget):
     def update_texts(self):
         lang = self.current_lang
 
-        # Update teks tombol Apache (Toggle diupdate via update_service_status)
         self.btn_apache_config.setText(tr(lang, "btn_apache_config"))
         self.btn_apache_www.setText(tr(lang, "btn_open_www"))
 
-        # Update teks tombol MariaDB
         self.btn_mysql_config.setText(tr(lang, "btn_mysql_config"))
         self.btn_mysql_pma.setText(tr(lang, "btn_phpmyadmin"))
         self.btn_mysql_password.setText(tr(lang, "btn_set_password"))
         self.action_mariadb_pass.setText(tr(lang, "menu_mariadb_password"))
         self.action_redis_pass.setText(tr(lang, "menu_redis_password"))
 
-        # Update teks tombol Redis
         self.btn_redis_config.setText(tr(lang, "btn_redis_config"))
         self.btn_redis_data.setText(tr(lang, "btn_redis_data"))
         self.action_redis_cli.setText(tr(lang, "btn_redis_cli"))
@@ -1601,7 +2290,7 @@ class ControlPanel(QWidget):
         self.show_action.setText(tr(self.current_lang, "tray_menu_show"))
         self.minimize_action.setText(tr(self.current_lang, "tray_menu_minimize"))
         self.exit_action.setText(tr(self.current_lang, "tray_menu_exit"))
-        
+
         self.start_all_action.setText(tr(self.current_lang, "tray_start_all"))
         self.stop_all_action.setText(tr(self.current_lang, "tray_stop_all"))
         self.online_all_action.setText(tr(self.current_lang, "tray_online_all"))
@@ -1633,10 +2322,18 @@ class ControlPanel(QWidget):
 
     def open_log_in_notepad(self, relative_path):
         path = os.path.join(BASE_PATH, relative_path)
-        if os.path.exists(path):
-            subprocess.Popen(["notepad.exe", path])
-        else:
-            QMessageBox.warning(self, tr(self.current_lang, "error_title"), tr(self.current_lang, "msg_file_not_found"))
+        # Pastikan folder ada
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # Buat file kosong jika belum ada, agar Notepad bisa membuka
+        if not os.path.exists(path):
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(f"# Log file for {os.path.basename(path)}\n")
+                    f.write("# Belum ada aktivitas. Service mungkin belum pernah berjalan.\n")
+            except Exception as e:
+                QMessageBox.warning(self, tr(self.current_lang, "error_title"), str(e))
+                return
+        subprocess.Popen(["notepad.exe", path])
 
     def change_access(self, name, external):
         if name == "apache": set_apache_access(external)
@@ -1646,13 +2343,13 @@ class ControlPanel(QWidget):
 
     def check_online_config(self, name):
         if name == "apache":
-            conf_path = os.path.join(BASE_PATH, "config", "httpd.conf")
+            conf_path = APACHE_CONF_PATH
             search_str = "Listen 0.0.0.0"
         elif name == "mysql":
-            conf_path = os.path.join(BASE_PATH, "config", "my.ini")
+            conf_path = MYSQL_CONF_PATH
             search_str = "bind-address=0.0.0.0"
         elif name == "redis":
-            conf_path = os.path.join(BASE_PATH, "redis", "redis.windows.conf")
+            conf_path = REDIS_CONF_PATH
             search_str = "bind 0.0.0.0"
         else:
             return False
@@ -1668,19 +2365,16 @@ class ControlPanel(QWidget):
         return False
 
     def update_service_status(self):
-        """Timer hanya memicu pembaruan UI untuk semua layanan secara kolektif."""
         for service in ["apache", "mysql", "redis"]:
             self.update_service_ui(service)
 
     def update_service_ui(self, name):
-        """Fungsi mandiri untuk memperbarui seluruh elemen UI terkait satu layanan."""
         lang = self.current_lang
-        
+
         with self.busy_lock:
             is_busy = name in self.busy_services
             action = self.busy_services.get(name)
-        
-        # 1. Deteksi Port dan Mode
+
         port_defaults = {"apache": "80", "mysql": "3306", "redis": "6379"}
         port_val = get_setting(f"{name}_port", port_defaults[name])
         try:
@@ -1688,17 +2382,14 @@ class ControlPanel(QWidget):
         except (ValueError, TypeError):
             port = int(port_defaults[name])
 
-        # Periksa status berdasarkan Port ATAU PID untuk menghindari lag saat startup
         pid = int(get_setting(f"{name}_pid", "0"))
         is_running = is_port_in_use(port) or is_pid_running(pid)
-        
+
         is_online = get_setting(f"{name}_access_mode", "local") == "external"
-        
-        # 2. Update Tombol Start/Stop (Berbasis Aksi)
+
         run_key = f"btn_{name}_stop" if is_running else f"btn_{name}_run"
         run_text = tr(lang, run_key)
-        
-        # 1.5. Update Button State (Busy vs Normal)
+
         toggle_btn = getattr(self, f"btn_{name}_toggle")
         toggle_btn.setEnabled(not is_busy)
 
@@ -1706,7 +2397,7 @@ class ControlPanel(QWidget):
             toggle_btn.setText(tr(lang, "btn_starting" if action == "start" else "btn_stopping"))
         else:
             toggle_btn.setText(run_text)
-        
+
         tray_run = getattr(self, f"{name}_tray_run")
         tray_run.setText(tr(lang, "btn_starting" if action == "start" else "btn_stopping") if is_busy else run_text)
         run_icon = "stop.png" if is_running else "start.png"
@@ -1717,12 +2408,10 @@ class ControlPanel(QWidget):
             std_icon = QStyle.SP_MediaStop if is_running else QStyle.SP_MediaPlay
             tray_run.setIcon(self.style().standardIcon(std_icon))
 
-        # 3. Update Tombol Mode Akses (Berbasis Status - Sesuai Permintaan)
-        # Jika online, tampilkan "Public Mode". Jika offline, tampilkan "Local Mode".
         mode_key = f"btn_{name}_external" if is_online else f"btn_{name}_local"
         mode_text = tr(lang, mode_key)
         getattr(self, f"btn_{name}_access_toggle").setText(mode_text)
-        
+
         tray_access = getattr(self, f"{name}_tray_access")
         tray_access.setText(mode_text)
         acc_icon = "public.png" if is_online else "local.png"
@@ -1733,12 +2422,10 @@ class ControlPanel(QWidget):
             std_icon = QStyle.SP_DriveNetIcon if is_online else QStyle.SP_DriveHDIcon
             tray_access.setIcon(self.style().standardIcon(std_icon))
 
-        # 4. Update Label Status Utama (Berbasis Status)
         status_label = getattr(self, f"{name}_status")
         online_label = tr(lang, "status_public" if is_online else "status_local")
-        
+
         if is_busy:
-            # Gunakan status 'Running' sebagai basis jika sedang proses berhenti
             status_key = f"{name}_status_running" if action == "stop" else f"{name}_status"
             base_status = tr(lang, status_key)
             label_text = f"{base_status}... ({tr(lang, 'btn_starting' if action == 'start' else 'btn_stopping')})"
@@ -1751,12 +2438,12 @@ class ControlPanel(QWidget):
             base_status = tr(lang, f"{name}_status")
             label_text = f"{base_status} ({online_label})"
             style = "color: red;"
-        
+
         status_label.setText(label_text)
         status_label.setStyleSheet(style)
 
     def toggle_startup(self, state):
-        enabled = (state == 2) # Qt.Checked
+        enabled = (state == 2)
         set_setting('run_on_startup', '1' if enabled else '0')
         set_run_on_startup(enabled)
 
@@ -1779,7 +2466,7 @@ class ControlPanel(QWidget):
 
     def resizeEvent(self, event):
         if not self.isMinimized():
-            self.resize_timer.start(500)  # Simpan 500ms setelah resize berhenti
+            self.resize_timer.start(500)
         super().resizeEvent(event)
 
     def changeEvent(self, event):
@@ -1819,7 +2506,6 @@ class ControlPanel(QWidget):
 
     def apply_port_settings(self):
         prepare_environment()
-        # Re-apply current access modes with new ports
         set_apache_access(get_setting('apache_access_mode', 'local') == 'external', force=True)
         set_mysql_access(get_setting('mysql_access_mode', 'local') == 'external', force=True)
         set_redis_access(get_setting('redis_access_mode', 'local') == 'external', force=True)
@@ -1832,11 +2518,10 @@ class ControlPanel(QWidget):
     def start_all_services(self):
         for name in ["apache", "mysql", "redis"]:
             is_online = get_setting(f'{name}_access_mode', 'local') == 'external'
-            # Re-apply config based on current DB setting
             if name == "apache": set_apache_access(is_online)
             elif name == "mysql": set_mysql_access(is_online)
             elif name == "redis": set_redis_access(is_online)
-            
+
             path = APACHE_PATH if name == "apache" else (MYSQL_PATH if name == "mysql" else REDIS_PATH)
             self.run_service(name, path)
 
@@ -1845,40 +2530,38 @@ class ControlPanel(QWidget):
             self.stop_service(svc)
 
     def _poll_service_status(self, name, target_state, timeout=30, interval=0.5):
-        """Memantau status layanan di thread terpisah hingga mencapai target atau timeout."""
         start_time = time.time()
         port_defaults = {"apache": "80", "mysql": "3306", "redis": "6379"}
-        
+
+        port_active = False
+        pid_active = False
         while time.time() - start_time < timeout:
             port_val = get_setting(f"{name}_port", port_defaults[name])
             try:
                 port = int(port_val)
             except:
                 port = int(port_defaults[name])
-            
+
             pid = int(get_setting(f"{name}_pid", "0"))
             port_active = is_port_in_use(port)
             pid_active = is_pid_running(pid)
 
-            if target_state: # Kita mencoba memulai layanan
-                # Konfirmasi berjalan jika port aktif DAN PID aktif
+            if target_state:
                 if port_active and pid_active:
                     add_log(f"Service {name} confirmed running (Port active: {port_active}, PID active: {pid_active}).")
                     break
-            else: # Kita mencoba menghentikan layanan
-                # Konfirmasi berhenti jika port TIDAK aktif DAN PID TIDAK aktif
+            else:
                 if not port_active and not pid_active:
                     add_log(f"Service {name} confirmed stopped (Port active: {port_active}, PID active: {pid_active}).")
                     break
             time.sleep(interval)
-        
-        else: # Blok ini dieksekusi jika loop selesai tanpa 'break' (yaitu, timeout)
+        else:
             add_log(f"Service {name} did not reach target state ({'running' if target_state else 'stopped'}) within {timeout} seconds. Current status: Port active={port_active}, PID active={pid_active}", "WARNING")
         with self.busy_lock:
             if name in self.busy_services: del self.busy_services[name]
         self.service_status_changed.emit(name)
+
     def set_all_online(self):
-        """Mengubah semua layanan ke Mode Publik (Online)."""
         add_log("Tray Action: Putting all services Online (Public Mode)...", "INFO")
         set_apache_access(True, force=True)
         set_mysql_access(True, force=True)
@@ -1886,27 +2569,21 @@ class ControlPanel(QWidget):
         self.update_service_status()
 
     def set_all_offline(self):
-        """Mengubah semua layanan ke Mode Lokal (Offline)."""
         add_log("Tray Action: Putting all services Offline (Local Mode)...", "INFO")
         set_apache_access(False, force=True)
         set_mysql_access(False, force=True)
         set_redis_access(False, force=True)
         self.update_service_status()
-        
+
     def configure_mariadb(self):
-        """Menghasilkan file konfigurasi my.ini dari template."""
         add_log("Configuring MariaDB environment...")
-        conf_path = os.path.join(BASE_PATH, "config", "my.ini")
-        replace_and_write("my-template.ini", conf_path)
+        replace_and_write(TEMPLATE_MYSQL, MYSQL_CONF_PATH)
 
     def initialize_mariadb(self):
-        add_log("Checking MariaDB data integrity...")
-        # data_root adalah folder 'data/mysql' (sesuai datadir di my.ini)
-        data_root = os.path.join(BASE_PATH, "data", "mysql")
-        # system_db_folder adalah folder 'mysql' di dalam data_root yang berisi tabel privilege
+        add_log(f"Checking MariaDB data integrity for instance: {APP_NAME}")
+        data_root = os.path.abspath(INSTANCE_MYSQL_DATA)
         system_db_folder = os.path.join(data_root, "mysql")
-        
-        # Jika folder sistem 'mysql' sudah ada dan berisi file, lewati instalasi
+
         if os.path.exists(system_db_folder) and os.path.isdir(system_db_folder):
             if os.listdir(system_db_folder):
                 add_log("MariaDB system tables already exist. Skipping initialization.")
@@ -1916,22 +2593,21 @@ class ControlPanel(QWidget):
         try:
             os.makedirs(data_root, exist_ok=True)
             self.configure_mariadb()
-            
-            install_bin = os.path.join(BASE_PATH, "mysql", "bin", "mariadb-install-db.exe")
+
+            install_bin = os.path.abspath(
+                os.path.join(BASE_PATH, "mysql", "bin", "mariadb-install-db.exe"))
             if not os.path.exists(install_bin):
                 add_log("CRITICAL: mariadb-install-db.exe missing!", "ERROR")
                 return False
-            
-            # Gunakan data_root sebagai --datadir. 
-            # mariadb-install-db akan membuat folder 'mysql' di dalamnya secara otomatis.
+
             res = subprocess.run(
-                [install_bin, f"--datadir={data_root.replace('\\', '/')}"],
-                cwd=os.path.join(BASE_PATH, "mysql"),
+                [install_bin, f"--datadir={data_root.replace(chr(92), '/')}"],
+                cwd=os.path.abspath(os.path.join(BASE_PATH, "mysql")),
                 capture_output=True,
                 text=True,
                 creationflags=subprocess.CREATE_NO_WINDOW
             )
-            
+
             if res.returncode == 0:
                 add_log("MariaDB data directory initialized successfully.")
                 set_setting('mariadb_installed', '1')
@@ -1947,15 +2623,22 @@ class ControlPanel(QWidget):
         with self.busy_lock:
             self.busy_services[name] = "start"
         self.update_service_ui(name)
-        QApplication.processEvents() # Paksa UI untuk update teks "Starting..."
+        QApplication.processEvents()
 
-        # Perbaikan Logika Service Root:
-        # Apache & MySQL berada di folder /bin/ (naik 2 level)
-        # Redis biasanya langsung berada di foldernya (naik 1 level)
-        parent_dir = os.path.dirname(path)
-        service_root = parent_dir if name == "redis" else os.path.dirname(parent_dir)
-        
-        # Port Check
+        # ============================================================
+        # ABSOLUTKAN SEMUA PATH — service seperti Apache/MariaDB/Redis
+        # mengubah CWD-nya sendiri, jadi path relatif pasti salah.
+        # ============================================================
+        abs_binary = os.path.abspath(path)
+        service_root = os.path.dirname(os.path.dirname(abs_binary))
+        if name == "redis":
+            service_root = os.path.dirname(abs_binary)
+
+        abs_apache_conf = os.path.abspath(APACHE_CONF_PATH)
+        abs_mysql_conf  = os.path.abspath(MYSQL_CONF_PATH)
+        abs_redis_conf  = os.path.abspath(REDIS_CONF_PATH)
+        abs_php_ini     = os.path.abspath(PHP_INI_PATH)
+
         port_map = {
             "apache": int(get_setting('apache_port', '80')),
             "mysql": int(get_setting('mysql_port', '3306')),
@@ -1964,15 +2647,14 @@ class ControlPanel(QWidget):
         if name in port_map and is_port_in_use(port_map[name]):
             add_log(f"WARNING: Port {port_map[name]} already in use. {name} might fail to start.", "WARNING")
 
-        if not os.path.exists(path):
-            add_log(f"FAILED: Path not found - {path}", "ERROR")
+        if not os.path.exists(abs_binary):
+            add_log(f"FAILED: Binary not found - {abs_binary}", "ERROR")
             with self.busy_lock:
                 if name in self.busy_services: del self.busy_services[name]
             self.service_status_changed.emit(name)
             return
 
         if name == "mysql":
-            # Selalu cek keberadaan direktori sebelum start
             if not self.initialize_mariadb():
                 with self.busy_lock:
                     if name in self.busy_services: del self.busy_services[name]
@@ -1980,41 +2662,88 @@ class ControlPanel(QWidget):
                 return
 
         try:
-            args = [path]
+            args = [abs_binary]
             if name == "apache":
-                replace_and_write("httpd-template.conf", os.path.join(BASE_PATH, "config", "httpd.conf"))
-                replace_and_write("php-template.ini", os.path.join(BASE_PATH, "php", "php.ini"))
-                conf = os.path.join(BASE_PATH, "config", "httpd.conf")
-                args.extend(["-f", conf])
+                replace_and_write(TEMPLATE_HTTPD, abs_apache_conf)
+                replace_and_write(TEMPLATE_PHP,   abs_php_ini)
+                args.extend(["-f", abs_apache_conf])
             elif name == "mysql":
-                replace_and_write("my-template.ini", os.path.join(BASE_PATH, "config", "my.ini"))
-                conf = os.path.join(BASE_PATH, "config", "my.ini")
-                args.append(f"--defaults-file={conf}")
+                replace_and_write(TEMPLATE_MYSQL, abs_mysql_conf)
+                args.append(f"--defaults-file={abs_mysql_conf}")
             elif name == "redis":
-                replace_and_write("redis.windows-service-template.conf", os.path.join(BASE_PATH, "redis", "redis.windows.conf"))
-                conf = os.path.join(BASE_PATH, "redis", "redis.windows.conf")
-                if os.path.exists(conf):
-                    args.append(conf)
+                replace_and_write(TEMPLATE_REDIS, abs_redis_conf)
+                if os.path.exists(abs_redis_conf):
+                    args.append(abs_redis_conf)
 
             add_log(f"Starting {name}: {' '.join(args)}")
-            proc = subprocess.Popen(args, cwd=service_root, creationflags=subprocess.CREATE_NO_WINDOW)
-            
-            if name == "apache": self.apache_proc = proc
-            elif name == "mysql": 
+
+            os.makedirs(INSTANCE_LOGS_DIR, exist_ok=True)
+            stdout_path = os.path.join(INSTANCE_LOGS_DIR, f"{name}-stdout.log")
+            stderr_path = os.path.join(INSTANCE_LOGS_DIR, f"{name}-stderr.log")
+
+            # Set environment untuk anak proses
+            child_env = os.environ.copy()
+            child_env["PHPRC"] = os.path.dirname(abs_php_ini)   # untuk PHP
+            child_env["PHPRC_INI_FILE"] = abs_php_ini
+
+            stdout_fp = open(stdout_path, "ab")
+            stderr_fp = open(stderr_path, "ab")
+
+            proc = subprocess.Popen(
+                args,
+                cwd=service_root,                        # absolute
+                env=child_env,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                stdout=stdout_fp,
+                stderr=stderr_fp,
+            )
+            stdout_fp.close()
+            stderr_fp.close()
+
+            if name == "apache":  self.apache_proc = proc
+            elif name == "mysql":
                 self.mysql_proc = proc
                 set_setting('mariadb_installed', '1')
             elif name == "redis": self.redis_proc = proc
-            
+
             set_setting(f"{name}_pid", str(proc.pid))
             add_log(f"SUCCESS: {name} started (PID: {proc.pid})")
-            # Mulai polling hingga layanan terdeteksi berjalan
-            
-            # Update UI segera setelah proses dimulai (tanpa menunggu polling port)
+
             with self.busy_lock:
                 if name in self.busy_services: del self.busy_services[name]
             self.service_status_changed.emit(name)
-            
-            poll_thread = threading.Thread(target=self._poll_service_status, args=(name, True), daemon=True)
+
+            def _early_check():
+                time.sleep(3)
+                ret = proc.poll()
+                if ret is not None:
+                    add_log(
+                        f"ERROR: {name} exited quickly (exit code {ret}). "
+                        f"Reading stderr for details...",
+                        "ERROR"
+                    )
+                    try:
+                        with open(stderr_path, "r", encoding="utf-8", errors="ignore") as f:
+                            lines = [ln.rstrip() for ln in f.readlines() if ln.strip()]
+                        for ln in lines[-30:]:
+                            add_log(f"[{name}-stderr] {ln}", "ERROR")
+                    except Exception as e:
+                        add_log(f"Failed to read {stderr_path}: {e}", "ERROR")
+
+                    try:
+                        with open(stdout_path, "r", encoding="utf-8", errors="ignore") as f:
+                            lines = [ln.rstrip() for ln in f.readlines() if ln.strip()]
+                        for ln in lines[-30:]:
+                            add_log(f"[{name}-stdout] {ln}", "INFO")
+                    except Exception:
+                        pass
+
+                    set_setting(f"{name}_pid", "0")
+
+            threading.Thread(target=_early_check, daemon=True).start()
+
+            poll_thread = threading.Thread(
+                target=self._poll_service_status, args=(name, True), daemon=True)
             poll_thread.start()
         except Exception as e:
             add_log(f"FAILED to start {name}: {str(e)}", "ERROR")
@@ -2027,12 +2756,11 @@ class ControlPanel(QWidget):
             self.busy_services[name] = "stop"
         add_log(f"Stopping service: {name}")
         self.update_service_ui(name)
-        QApplication.processEvents() # Paksa UI untuk update teks "Stopping..."
+        QApplication.processEvents()
 
         proc = getattr(self, f"{name}_proc")
         if proc and proc.poll() is None:
             try:
-                # Graceful termination
                 proc.terminate()
                 proc.wait(timeout=5)
                 add_log(f"Service {name} terminated gracefully.")
@@ -2040,10 +2768,6 @@ class ControlPanel(QWidget):
                 add_log(f"Service {name} didn't stop in time, forcing kill...", "WARNING")
                 proc.kill()
         else:
-            # Fallback menggunakan image name jika objek proses tidak tersedia (misal: aplikasi di-restart)
-            # Menggunakan taskkill /IM /F sesuai permintaan pengguna.
-            # PERHATIAN: Ini akan menghentikan SEMUA proses dengan nama gambar yang sama,
-            # bukan hanya yang dimulai oleh panel ini.
             image_name_map = {
                 "apache": "httpd.exe",
                 "mysql": "mysqld.exe",
@@ -2055,7 +2779,7 @@ class ControlPanel(QWidget):
                     subprocess.run(["taskkill", "/IM", image_name, "/F"],
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                    creationflags=subprocess.CREATE_NO_WINDOW,
-                                   check=True) # check=True akan memunculkan CalledProcessError untuk kode keluar non-nol
+                                   check=True)
                     add_log(f"Sent forceful termination to all processes with image name {image_name}.")
                 except subprocess.CalledProcessError:
                     add_log(f"No process with image name {image_name} found to terminate.", "INFO")
@@ -2066,17 +2790,14 @@ class ControlPanel(QWidget):
 
         setattr(self, f"{name}_proc", None)
         set_setting(f"{name}_pid", "0")
-        
-        # Update UI segera setelah perintah stop dikirim
+
         with self.busy_lock:
             if name in self.busy_services: del self.busy_services[name]
         self.service_status_changed.emit(name)
-        
-        # Mulai polling hingga layanan terdeteksi benar-benar berhenti
+
         threading.Thread(target=self._poll_service_status, args=(name, False), daemon=True).start()
 
     def run_startup_tasks(self):
-        """Menjalankan semua task startup yang aktif."""
         add_log("Executing enabled startup tasks...")
         with db_lock:
             conn = sqlite3.connect(DB_PATH)
@@ -2084,7 +2805,7 @@ class ControlPanel(QWidget):
             cur.execute("SELECT id, command FROM startup_tasks WHERE enabled=1")
             tasks = cur.fetchall()
             conn.close()
-        
+
         for tid, cmd in tasks:
             self.run_single_startup_task(tid, cmd)
 
@@ -2106,20 +2827,20 @@ class ControlPanel(QWidget):
     def load_logs(self):
         self.log_table.setRowCount(0)
         keyword = self.search_input.text().strip()
-        
+
         with db_lock:
             conn = sqlite3.connect(DB_PATH)
             cur = conn.cursor()
-            
+
             if keyword:
                 query = "SELECT timestamp, level, message FROM logs WHERE message LIKE ? OR level LIKE ? ORDER BY id DESC LIMIT 100"
                 cur.execute(query, (f'%{keyword}%', f'%{keyword}%'))
             else:
                 cur.execute("SELECT timestamp, level, message FROM logs ORDER BY id DESC LIMIT 100")
-                
+
             logs = cur.fetchall()
             conn.close()
-            
+
         for row_data in logs:
             row_num = self.log_table.rowCount()
             self.log_table.insertRow(row_num)
@@ -2138,46 +2859,45 @@ class ControlPanel(QWidget):
 
 if __name__ == "__main__":
     try:
-        # Fix agar ikon muncul di taskbar & title bar pada Windows
+        app = QApplication(sys.argv)
+        # --- Inisialisasi DB DULU sebelum get_setting dipanggil ---
+        init_db()
+        # Fix agar ikon muncul di taskbar & title bar pada Windows (per-instance)
         if os.name == 'nt':
-            myappid = get_setting('appid', 'planetbiruserver')
+            myappid = f"{get_setting('appid', 'planetbiruserver')}.{APP_NAME}"
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
 
-        app = QApplication(sys.argv)
-        init_db()
+
         lang = get_setting('language', 'en')
 
         if os.name == 'nt':
-            # Single instance check menggunakan Mutex
-            # Simpan handle dalam variabel 'instance_mutex' agar tidak terhapus oleh garbage collector
-            instance_mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "Global\\PortableServerControlPanelMutex")
-            if ctypes.windll.kernel32.GetLastError() == 183: # 183 = ERROR_ALREADY_EXISTS
+            # Single instance check per-instance (mutex unik per nama exe)
+            instance_mutex = ctypes.windll.kernel32.CreateMutexW(
+                None, False, f"Global\\PortableServerControlPanelMutex_{APP_NAME}")
+            if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
                 QMessageBox.information(None, tr(lang, "app_running_title"), tr(lang, "app_running_msg"))
                 sys.exit(0)
 
         app.setQuitOnLastWindowClosed(False)
-        # Menjalankan scheduler di thread terpisah
         threading.Thread(target=scheduler_loop, daemon=True).start()
-        
+
         window = ControlPanel()
         if get_setting('auto_start_services', '0') == '1':
             window.start_all_services()
         window.run_startup_tasks()
         if get_setting('start_minimized', '0') == '0':
             window.show()
-            
+
         sys.exit(app.exec_())
     except Exception as e:
-        # Jika error terjadi sebelum database siap, gunakan default 'en'
         try:
             lang = get_setting('language', 'en')
         except:
             lang = 'en'
-            
+
         if 'app' not in locals():
             error_app = QApplication(sys.argv)
-            
-        # Jangan tampilkan pesan jika error terkait pembersihan folder temporary PyInstaller
+
         error_str = str(e)
         if "_MEI" in error_str and ("temporary directory" in error_str or "directory is not empty" in error_str.lower()):
             sys.exit(0)
